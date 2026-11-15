@@ -130,7 +130,9 @@ def build_mcp(state: State) -> FastMCP:
                 new_since=parse_when(new_since, tz),
                 include_ended=include_ended,
             )
-            out = await queries.search(state.pool, state.embedder, query, filters, tz, limit)
+            out = await queries.search(
+                state.pool, state.embedder, query, filters, tz, limit, state.settings.semantic_max_distance
+            )
             state.metrics.search_mode.labels(semantic=out["semantic_search"]).inc()
             return out
 
@@ -202,6 +204,7 @@ def make_embedder(settings: Settings) -> OpenAIEmbedder | None:
         api_key=settings.embedding_api_key.get_secret_value(),
         timeout_sec=settings.embedding_timeout_sec,
         retry_after_sec=settings.embedding_retry_after_sec,
+        query_prefix=settings.embedding_query_prefix,
     )
 
 

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     embedding_timeout_sec: float = 5.0
     embedding_retry_after_sec: float = 60.0
     """After a failed call, skip the endpoint for this long instead of waiting on every query."""
+    semantic_max_distance: float = 0.75
+    """Cosine distance beyond which a vector hit is not a match. Calibrated on Qwen3-Embedding-0.6B:
+    relevant listings sat at 0.49-0.64, unrelated ones at 0.83 and up."""
 
     timezone: str = "Europe/Berlin"
     """Zone used to read bare dates (``2026-11-21``) in tool arguments and to render times."""
