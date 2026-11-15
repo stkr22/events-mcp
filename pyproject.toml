@@ -1,0 +1,90 @@
+[build-system]
+requires = ["uv_build~=0.13.6"]
+build-backend = "uv_build"
+
+[project]
+name = "events-mcp"
+version = "0.1.0"
+description = "MCP server over a Postgres/pgvector store of scraped venue events, exhibitions and channel content."
+authors = [
+    { name = "stkr22", email = "stkr22@github.com" }
+]
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.14,<3.15"
+license-files = [
+    "LICENSE",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.14"
+]
+
+dependencies = [
+    "httpx~=0.28",
+    "mcp>=1.20,<2",
+    "prometheus-client>=0.21",
+    "psycopg[binary,pool]~=3.2",
+    "pydantic-settings~=2.10",
+    "uvicorn>=0.35",
+]
+
+[project.scripts]
+events-mcp = "events_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/stkr22/events-mcp"
+Repository = "https://github.com/stkr22/events-mcp"
+Issues = "https://github.com/stkr22/events-mcp/issues"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "ty>=0.0.1a20",
+    "pytest>=8.4",
+    "pytest-cov>=6",
+    "pytest-asyncio>=1.0",
+    "pytest-timeout>=2.4",
+]
+
+[tool.uv]
+required-version = "~=0.13.6"
+
+[tool.ty.rules]
+possibly-unresolved-reference = "warn"
+unused-ignore-comment = "warn"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = ["-ra", "-q"]
+testpaths = [
+    "tests",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+timeout = "60"
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "UP", "N", "B", "C4", "RET", "SIM", "ARG", "PTH", "W", "Q",
+    "TID", "ICN", "PIE", "ERA", "PL", "RUF", "ASYNC", "D", "S",
+]
+ignore = [
+    "E203",
+    "D203",  # Incompatible with D211
+    "D213",  # Incompatible with D212
+    "S608",  # SQL is composed from fixed fragments only; values always go through parameters
+    "PLR0913",  # MCP tool signatures are their parameter lists
+    "PLR0917",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/**/*.py" = ["S101", "S105", "S106", "S107", "PLR2004", "D", "ARG001", "ARG002"]

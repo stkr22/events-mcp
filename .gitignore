@@ -1,0 +1,10 @@
+*.tgz
+.venv/
+__pycache__/
+.mypy_cache/
+.ruff_cache/
+dist/
+.coverage
+coverage.xml
+.vscode/
+.pytest_cache/

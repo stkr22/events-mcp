@@ -1,0 +1,129 @@
+"""Command line: ``serve`` (default), ``migrate``, ``import`` and ``backfill-embeddings``."""
+
+import argparse
+import asyncio
+import json
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import uvicorn
+from prometheus_client import start_http_server
+
+from events_mcp.config import Settings, get_settings
+from events_mcp.db import connect, migrate_with_retry
+from events_mcp.embeddings import document_text
+from events_mcp.ingest import Item, backfill_embeddings, finish_run, start_run, upsert_event, upsert_source
+from events_mcp.server import create_app, make_embedder
+
+log = logging.getLogger("events_mcp")
+
+
+def _serve(settings: Settings) -> None:
+    app, state = create_app(settings, make_embedder(settings))
+    start_http_server(settings.metrics_port, registry=state.metrics.registry)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_config=None, proxy_headers=False)
+
+
+async def _migrate(settings: Settings) -> None:
+    applied = await migrate_with_retry(settings.database_url.get_secret_value(), attempts=3)
+    print("applied:", ", ".join(applied) or "nothing pending")
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    dt = datetime.fromisoformat(str(value))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=get_settings().tz)
+    return dt
+
+
+def _item(obj: dict[str, Any]) -> Item:
+    return Item(
+        title=obj["title"],
+        dedupe_key=obj["dedupe_key"],
+        kind=obj["kind"],
+        summary=obj.get("summary"),
+        raw_text=obj.get("raw_text"),
+        url=obj.get("url"),
+        starts_at=_parse_dt(obj.get("starts_at")),
+        ends_at=_parse_dt(obj.get("ends_at")),
+        city=obj.get("city"),
+        status=obj.get("status"),
+        venue=obj.get("venue"),
+    )
+
+
+async def _import(settings: Settings, args: argparse.Namespace) -> None:
+    """Upsert a JSON-lines file of items for one source, recorded as one scrape_run."""
+    text = await asyncio.to_thread(Path(args.file).read_text, encoding="utf-8")
+    lines = [json.loads(line) for line in text.splitlines() if line.strip()]
+    items = [_item(obj) for obj in lines]
+    embedder = make_embedder(settings) if not args.no_embed else None
+    vectors: list[list[float]] | None = None
+    if embedder is not None:
+        texts = [
+            document_text(i.title, i.summary, i.raw_text, i.kind, i.city, (i.venue or {}).get("name")) for i in items
+        ]
+        vectors = await embedder.embed(texts)
+        if vectors is None:
+            log.warning("embedding endpoint unavailable; importing without embeddings (run backfill-embeddings later)")
+        await embedder.aclose()
+    async with await connect(settings.database_url.get_secret_value()) as conn:
+        source_id = await upsert_source(conn, args.source_name, args.source_type, args.source_url, args.city)
+        run_id = await start_run(conn, source_id)
+        inserted = 0
+        try:
+            async with conn.transaction():
+                for n, item in enumerate(items):
+                    vec = vectors[n] if vectors else None
+                    _, new = await upsert_event(conn, source_id, item, vec, settings.embedding_model if vec else None)
+                    inserted += int(new)
+        except Exception as exc:
+            await finish_run(conn, run_id, "failed", 0, f"{type(exc).__name__}: {exc}")
+            raise
+        await finish_run(conn, run_id, "success", len(items))
+    print(f"{len(items)} items, {inserted} new, {len(items) - inserted} updated")
+
+
+async def _backfill(settings: Settings, args: argparse.Namespace) -> None:
+    embedder = make_embedder(settings)
+    if embedder is None:
+        sys.exit("EVENTS_EMBEDDING_BASE_URL is not set")
+    async with await connect(settings.database_url.get_secret_value()) as conn:
+        n = await backfill_embeddings(conn, embedder, args.batch_size)
+    await embedder.aclose()
+    print(f"embedded {n} items")
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Entry point."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    parser = argparse.ArgumentParser(prog="events-mcp")
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("serve", help="run the MCP server (default)")
+    sub.add_parser("migrate", help="apply pending migrations and exit")
+    imp = sub.add_parser("import", help="upsert a JSON-lines file of items for one source")
+    imp.add_argument("file")
+    imp.add_argument("--source-name", required=True)
+    imp.add_argument("--source-type", required=True, choices=["venue", "museum", "youtube", "feed"])
+    imp.add_argument("--source-url", required=True)
+    imp.add_argument("--city")
+    imp.add_argument("--no-embed", action="store_true", help="skip the embedding endpoint")
+    bf = sub.add_parser("backfill-embeddings", help="embed items missing a vector from the configured model")
+    bf.add_argument("--batch-size", type=int, default=16)
+    args = parser.parse_args(argv)
+
+    settings = get_settings()
+    match args.command:
+        case None | "serve":
+            _serve(settings)
+        case "migrate":
+            asyncio.run(_migrate(settings))
+        case "import":
+            asyncio.run(_import(settings, args))
+        case "backfill-embeddings":
+            asyncio.run(_backfill(settings, args))
