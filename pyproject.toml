@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "events-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server over a Postgres/pgvector store of scraped venue events, exhibitions and channel content."
 authors = [
     { name = "stkr22", email = "stkr22@github.com" }

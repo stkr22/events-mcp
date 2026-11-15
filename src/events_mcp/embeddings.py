@@ -23,6 +23,10 @@ class Embedder(Protocol):
         """Embed ``texts`` in order; ``None`` means unavailable."""
         ...
 
+    async def embed_query(self, query: str) -> list[list[float]] | None:
+        """Embed a search query (with whatever instruction the model wants for queries)."""
+        ...
+
 
 class OpenAIEmbedder:
     """``POST {base_url}/embeddings`` with a circuit breaker."""
@@ -36,9 +40,11 @@ class OpenAIEmbedder:
         timeout_sec: float = 5.0,
         retry_after_sec: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        query_prefix: str = "",
     ) -> None:
         """Create the client; no request is made until the first ``embed``."""
         self.model = model
+        self.query_prefix = query_prefix
         self.dimensions = dimensions
         self.retry_after_sec = retry_after_sec
         self._down_until = 0.0
@@ -77,6 +83,10 @@ class OpenAIEmbedder:
             self._trip(f"expected {len(texts)} vectors of {self.dimensions} dims")
             return None
         return vectors
+
+    async def embed_query(self, query: str) -> list[list[float]] | None:
+        """Embed a search query; documents are embedded without the prefix."""
+        return await self.embed([self.query_prefix + query])
 
     async def probe(self) -> bool:
         """Cheap liveness check (``GET /models``) for the metrics loop; also resets the breaker."""

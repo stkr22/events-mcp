@@ -60,6 +60,8 @@ stays open-ended. A video occupies its publish instant and never ends.
 | `EVENTS_EMBEDDING_MODEL` | `Qwen3-Embedding-0.6B-8bit` | must produce 1024-dim vectors (the column is `vector(1024)`) |
 | `EVENTS_EMBEDDING_TIMEOUT_SEC` | `5` | per request |
 | `EVENTS_EMBEDDING_RETRY_AFTER_SEC` | `60` | how long a failed endpoint is skipped before being retried |
+| `EVENTS_SEMANTIC_MAX_DISTANCE` | `0.75` | cosine distance beyond which a vector hit is dropped. With Qwen3-Embedding-0.6B, relevant listings scored 0.49–0.64 and unrelated ones 0.83+. Each semantic hit reports `semantic_distance`. |
+| `EVENTS_EMBEDDING_QUERY_PREFIX` | Qwen3 instruction | prepended to search queries only, never to documents |
 | `EVENTS_TIMEZONE` | `Europe/Berlin` | |
 | `EVENTS_PORT` / `EVENTS_METRICS_PORT` | `8000` / `9090` | MCP at `/mcp`, `/healthz`, `/readyz`; Prometheus on its own port |
 

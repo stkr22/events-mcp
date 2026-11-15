@@ -142,3 +142,20 @@ async def test_backfill(conn: AsyncConnection[DictRow], seeded: dict[str, int]) 
 async def test_invalid_kind(pool: Pool, seeded: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="kind"):
         await queries.search(pool, None, "", Filters(kind="concert"), TZ)
+
+
+async def test_loose_keyword_ignores_cross_language_stopwords(pool: Pool, seeded: dict[str, int]) -> None:
+    # "a" and "for" are not German stopwords and "die" is not an English one; none may match on its own.
+    out = await queries.search(pool, None, "a quiet evening for die", Filters(), TZ)
+    assert set(keys(out, seeded)) == {"ex-romantik", "ev-food-berlin"}  # only "quiet" counts
+    out = await queries.search(pool, None, "a for die und the", Filters(), TZ)
+    assert out["results"] == []
+
+
+async def test_semantic_distance_cutoff(pool: Pool, seeded: dict[str, int]) -> None:
+    # Only the video carries the "science" concept; every other vector is ~orthogonal (distance ~1).
+    out = await queries.search(pool, FakeEmbedder(), "science", Filters(), TZ)
+    assert keys(out, seeded) == ["yt-abc"]
+    assert out["results"][0]["semantic_distance"] < 0.1
+    out = await queries.search(pool, FakeEmbedder(), "science", Filters(), TZ, max_distance=2.0)
+    assert len(out["results"]) == 5  # every non-ended item once the cutoff is off

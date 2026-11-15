@@ -36,6 +36,9 @@ class FakeEmbedder:
             return None
         return [self.vector(t) for t in texts]
 
+    async def embed_query(self, query: str) -> list[list[float]] | None:
+        return await self.embed([query])
+
     @classmethod
     def vector(cls, text: str) -> list[float]:
         text = text.lower()
