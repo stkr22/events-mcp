@@ -189,3 +189,21 @@ async def test_shop_defaults_to_sale_kind(conn: AsyncConnection[DictRow], web: W
     await go(web, settings, sid, [FakeChat("mac", [answer])], type="shop")
     cur = await conn.execute("SELECT kind FROM events")
     assert [r["kind"] for r in await cur.fetchall()] == ["sale"]
+
+
+async def test_switching_tiers_keeps_keys_so_nothing_is_duplicated(
+    conn: AsyncConnection[DictRow], web: Web, settings: CrawlerSettings
+) -> None:
+    sid = (await sync_sources(conn, [source()]))["club"]
+    no_urls = {"items": [{"title": t, "starts_at": f"2026-11-{21 + i}"} for i, t in enumerate(TITLES)]}
+    await go(web, settings, sid, [FakeChat("mac", [no_urls, SCHEMA])])
+    cur = await conn.execute("SELECT dedupe_key FROM events")
+    first_keys = sorted(r["dedupe_key"] for r in await cur.fetchall())
+    assert all(k.startswith("t:") for k in first_keys)  # the LLM gave no URLs: title-hash keys
+
+    web.routes["/programm"] = ("text/html", cards(suffix=" 20:00"))
+    await go(web, settings, sid, [FakeChat("mac", [])])  # selectors now see URLs, would key on them
+    run = await last_run(conn)
+    assert (run["extractor"], run["items_new"], run["items_updated"]) == ("selectors", 0, 6)
+    cur = await conn.execute("SELECT dedupe_key FROM events")
+    assert sorted(r["dedupe_key"] for r in await cur.fetchall()) == first_keys
