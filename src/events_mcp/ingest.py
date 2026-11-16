@@ -4,6 +4,7 @@ The scraper (a separate project) is expected to write through the same SQL; the 
 command uses it directly, which is also how test rows get in.
 """
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -214,3 +215,116 @@ async def backfill_embeddings(conn: AsyncConnection[Any], embedder: Embedder, ba
             )
         total += len(rows)
         log.info("embedded %d items", total)
+
+
+async def touch_source(conn: AsyncConnection[Any], source_id: int) -> int:
+    """Bump ``last_seen`` for the rows present in the last successful extraction. Returns the row count.
+
+    Used when the page is unchanged: nothing is re-extracted, but the items are still on the page.
+    Rows that dropped out of an earlier extraction have ``last_seen`` before ``last_extracted_at``
+    and are left alone, so they go stale on schedule.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE events e SET last_seen = now()
+        FROM sources s
+        WHERE s.id = %s AND e.source_id = s.id AND s.last_extracted_at IS NOT NULL
+          AND e.last_seen >= s.last_extracted_at
+        """,
+        (source_id,),
+    )
+    return cur.rowcount
+
+
+async def mark_extracted(conn: AsyncConnection[Any], source_id: int, content_hash: str, run_id: int) -> None:
+    """Record that ``content_hash`` was fully extracted by ``run_id``.
+
+    ``last_extracted_at`` is the run's *start*, not now: upserts stamp ``last_seen`` inside the run,
+    so a later timestamp would exclude every row they wrote from the next ``touch_source``.
+    """
+    await conn.execute(
+        """
+        UPDATE sources SET last_extracted_hash = %(h)s, last_content_hash = %(h)s,
+            last_extracted_at = (SELECT started_at FROM scrape_runs WHERE id = %(run)s)
+        WHERE id = %(src)s
+        """,
+        {"h": content_hash, "run": run_id, "src": source_id},
+    )
+
+
+async def finish_run_detailed(
+    conn: AsyncConnection[Any],
+    run_id: int,
+    status: str,
+    *,
+    items_seen: int = 0,
+    error: str | None = None,
+    extractor: str | None = None,
+    content_hash: str | None = None,
+    snapshot_key: str | None = None,
+    llm_provider: str | None = None,
+    llm_calls: int = 0,
+    llm_input_chars: int = 0,
+    items_new: int = 0,
+    items_updated: int = 0,
+    items_touched: int = 0,
+    items_rejected: int = 0,
+) -> None:
+    """Close a run with the crawler's full accounting, and stamp ``sources.last_run``."""
+    await conn.execute(
+        """
+        WITH r AS (
+            UPDATE scrape_runs SET finished_at = now(), status = %(status)s, items_seen = %(seen)s, error = %(error)s,
+                extractor = %(extractor)s, content_hash = %(hash)s, snapshot_key = %(snap)s,
+                llm_provider = %(provider)s, llm_calls = %(calls)s, llm_input_chars = %(chars)s,
+                items_new = %(new)s, items_updated = %(upd)s, items_touched = %(touched)s,
+                items_rejected = %(rej)s
+            WHERE id = %(run)s RETURNING source_id, finished_at
+        )
+        UPDATE sources s SET last_run = r.finished_at FROM r WHERE s.id = r.source_id
+        """,
+        {
+            "run": run_id,
+            "status": status,
+            "seen": items_seen,
+            "error": error,
+            "extractor": extractor,
+            "hash": content_hash,
+            "snap": snapshot_key,
+            "provider": llm_provider,
+            "calls": llm_calls,
+            "chars": llm_input_chars,
+            "new": items_new,
+            "upd": items_updated,
+            "touched": items_touched,
+            "rej": items_rejected,
+        },
+    )
+
+
+async def sync_source(
+    conn: AsyncConnection[Any], name: str, type_: str, url: str, city: str | None, interval: str, config: dict[str, Any]
+) -> int:
+    """Upsert a source from ``sources.yaml`` and (re-)enable it. Runtime state columns are left alone."""
+    cur = await conn.execute(
+        """
+        INSERT INTO sources (name, type, url, city, scrape_interval, config, enabled)
+        VALUES (%s, %s, %s, %s, %s::interval, %s::jsonb, true)
+        ON CONFLICT (name) DO UPDATE
+            SET type = EXCLUDED.type, url = EXCLUDED.url, city = EXCLUDED.city,
+                scrape_interval = EXCLUDED.scrape_interval, config = EXCLUDED.config, enabled = true
+        RETURNING id
+        """,
+        (name, type_, url, city, interval, json.dumps(config)),
+    )
+    row = await cur.fetchone()
+    assert row is not None  # noqa: S101
+    return _first(row)
+
+
+async def disable_missing(conn: AsyncConnection[Any], names: list[str]) -> list[str]:
+    """Disable every source not in ``names`` (rows and history stay). Returns the names newly disabled."""
+    cur = await conn.execute(
+        "UPDATE sources SET enabled = false WHERE enabled AND NOT (name = ANY(%s)) RETURNING name", (names,)
+    )
+    return [r["name"] if isinstance(r, dict) else r[0] for r in await cur.fetchall()]
