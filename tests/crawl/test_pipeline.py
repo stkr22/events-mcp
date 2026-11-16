@@ -25,7 +25,10 @@ def test_known_keys_and_different_days_are_left_alone() -> None:
 
 
 def test_ambiguous_or_already_taken_matches_are_not_adopted() -> None:
-    stored = [("t:1", "Pub Quiz", D), ("t:2", "Pub Quiz", D)]  # two rows with the same signature: unclear which
+    stored: list[tuple[str, str, datetime | None]] = [
+        ("t:1", "Pub Quiz", D),
+        ("t:2", "Pub Quiz", D),
+    ]  # two rows with the same signature: unclear which
     pairs = [item("u:a", "Pub Quiz")]
     assert stabilize_keys(pairs, stored, TZ) == 0
     # Two new items cannot both adopt the same stored row.
