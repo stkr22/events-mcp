@@ -10,6 +10,8 @@ from events_mcp.embeddings import Embedder, vector_literal
 
 Kind = Literal["event", "exhibition", "video", "sale", "other"]
 KINDS: tuple[str, ...] = ("event", "exhibition", "video", "sale", "other")
+RegistrationState = Literal["not_yet_open", "open", "closed"]
+REGISTRATION_STATES: tuple[str, ...] = ("not_yet_open", "open", "closed")
 
 # Reciprocal-rank-fusion constant; 60 is the usual choice and is insensitive in practice.
 RRF_K = 60
@@ -18,6 +20,7 @@ SUMMARY_CHARS = 300
 
 _LIST_COLUMNS = """
     l.id, l.title, l.kind, l.starts_at, l.ends_at, l.city, l.url, l.status, l.lifecycle, l.is_stale,
+    l.registration_state, l.registration_opens_at, l.registration_closes_at, l.tickets_url,
     l.first_seen, l.last_seen, left(l.summary, %(summary_chars)s::int) AS summary,
     v.name AS venue, v.address AS venue_address, s.name AS source
 """
@@ -53,6 +56,8 @@ class Filters:
     kinds: list[str] | None = None
     exclude_sales: bool = False
     """Leave out kind=sale unless a kind filter names it: "what is on" is about events, not discounts."""
+    registration: str | None = None
+    """not_yet_open, open or closed; items that say nothing about registration never match."""
     date_from: datetime | None = None
     date_to: datetime | None = None
     source: str | None = None
@@ -60,22 +65,31 @@ class Filters:
     include_ended: bool = False
     params: dict[str, Any] = field(default_factory=dict)
 
-    def where(self) -> LiteralString:
-        """Build the WHERE clause and fill ``self.params``."""
-        clauses: list[LiteralString] = []
+    def _kind_clause(self) -> LiteralString | None:
         p = self.params
         if self.kind:
             if self.kind not in KINDS:
                 raise ValueError(f"kind must be one of {', '.join(KINDS)}")
-            clauses.append("l.kind = %(kind)s")
             p["kind"] = self.kind
-        elif self.kinds:
+            return "l.kind = %(kind)s"
+        if self.kinds:
             if bad := [k for k in self.kinds if k not in KINDS]:
                 raise ValueError(f"kinds must be among {', '.join(KINDS)}; got {', '.join(bad)}")
-            clauses.append("l.kind = ANY(%(kinds)s)")
             p["kinds"] = self.kinds
-        elif self.exclude_sales:
-            clauses.append("l.kind <> 'sale'")
+            return "l.kind = ANY(%(kinds)s)"
+        return "l.kind <> 'sale'" if self.exclude_sales else None
+
+    def where(self) -> LiteralString:
+        """Build the WHERE clause and fill ``self.params``."""
+        clauses: list[LiteralString] = []
+        p = self.params
+        if kind_clause := self._kind_clause():
+            clauses.append(kind_clause)
+        if self.registration:
+            if self.registration not in REGISTRATION_STATES:
+                raise ValueError(f"registration must be one of {', '.join(REGISTRATION_STATES)}")
+            clauses.append("l.registration_state = %(registration)s")
+            p["registration"] = self.registration
         if self.city:
             clauses.append("lower(l.city) = lower(%(city)s)")
             p["city"] = self.city.strip()
@@ -254,6 +268,7 @@ async def get_event(pool: Pool, event_id: int, tz: ZoneInfo) -> dict[str, Any] |
     sql = """
         SELECT l.id, l.title, l.kind, l.starts_at, l.ends_at, l.city, l.url, l.status, l.lifecycle,
                l.is_stale, l.first_seen, l.last_seen, l.summary, l.raw_text, l.embedding_model,
+               l.registration_state, l.registration_opens_at, l.registration_closes_at, l.tickets_url,
                v.name AS venue, v.address AS venue_address, v.city AS venue_city, v.lat AS venue_lat,
                v.lon AS venue_lon, s.name AS source, s.type AS source_type, s.url AS source_url
         FROM event_lifecycle l
@@ -282,3 +297,22 @@ def window_for_days(days: int) -> timedelta:
     if days < 1 or days > 366:  # noqa: PLR2004
         raise ValueError("days must be between 1 and 366")
     return timedelta(days=days)
+
+
+async def registration_deadlines(
+    pool: Pool, filters: Filters, days: int, which: Literal["closing", "opening"], tz: ZoneInfo, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Not-ended, not-cancelled items whose registration closes (or opens) within the next ``days`` days."""
+    column: LiteralString = "l.registration_closes_at" if which == "closing" else "l.registration_opens_at"
+    where = filters.where()
+    sql = f"""
+        SELECT {_LIST_COLUMNS} {_LIST_FROM}
+        WHERE {where}
+          AND {column} >= now() AND {column} <= now() + make_interval(days => %(days)s::int)
+          AND l.lifecycle <> 'ended'
+          AND l.status IS DISTINCT FROM 'cancelled'
+        ORDER BY {column}, l.id
+        LIMIT %(limit)s
+    """
+    params = {**filters.params, "summary_chars": SUMMARY_CHARS, "days": days, "limit": limit}
+    return [_row(r, tz) for r in await _fetch(pool, sql, params)]

@@ -139,3 +139,33 @@ def test_chunking_prefers_headings_and_respects_the_limit() -> None:
     assert chunk_text("short", 3000) == ["short"]
     huge = "y" * 7000
     assert [len(c) for c in chunk_text(huge, 3000)] == [3000, 3000, 1000]
+
+
+def test_guards_keep_registration_and_only_drop_what_is_wrong() -> None:
+    page = PAGE + "\nTickets: https://tickets.other.example/nordlicht\n"
+    raw = [
+        LlmItem(
+            title="Konzert Nordlicht",
+            registration_opens_at="2026-11-01",
+            registration_closes_at="2026-11-20T18:00",
+            tickets_url="https://tickets.other.example/nordlicht",  # another site, but the page shows it
+        ),
+        LlmItem(title="Salz und Stein", registration_closes_at="2026-11-20", tickets_url="/buy"),
+        LlmItem(  # a link the page never mentions, and dates out of order
+            title="Konzert Nordlicht",
+            registration_opens_at="2026-12-01",
+            registration_closes_at="2026-11-01",
+            tickets_url="https://made-up.example/x",
+        ),
+        LlmItem(title="Salz und Stein", registration_closes_at="bald", tickets_url="javascript:alert(1)"),
+    ]
+    items, rejected = apply_guards(raw, page, src(), TZ, URL)
+    assert rejected == 0  # a bad registration field never costs the item
+    first, second, third, fourth = items
+    assert first.registration_opens_at is not None and first.registration_closes_at is not None
+    assert first.registration_closes_at.isoformat() == "2026-11-20T18:00:00+01:00"
+    assert first.tickets_url == "https://tickets.other.example/nordlicht"
+    assert (second.registration_opens_at, second.registration_closes_at is not None) == (None, True)
+    assert second.tickets_url == "https://venue.example/buy"
+    assert (third.registration_opens_at, third.registration_closes_at, third.tickets_url) == (None, None, None)
+    assert (fourth.registration_closes_at, fourth.tickets_url) == (None, None)

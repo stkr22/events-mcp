@@ -18,6 +18,7 @@ upsert SQL (`events_mcp.ingest`). This server owns the schema: its migrations ru
 | `search_events(query, date_from, date_to, city, kind, source, new_since, include_ended, limit)` | Hybrid search. Full-text search (German + English stems) always runs. pgvector similarity runs when the embedding endpoint answers. The two are fused by reciprocal rank. When the endpoint is down, the result says `semantic_search: "unavailable"` and holds keyword matches only. |
 | `upcoming(city, days, kind)` | Items running now or starting within `days`; cancelled items are left out |
 | `ending_soon(city, days, kind)` | Items whose explicit `ends_at` falls within `days` |
+| `registration_deadlines(city, days, which, kind)` | Items whose stated registration / ticket-sale window closes (`which="closing"`, default) or opens (`"opening"`) within `days`, soonest first. Ended and cancelled items are left out |
 | `get_event(event_id)` | One item, with page text, venue and source |
 | `list_sources()` | Sources with item counts and their last successful scrape |
 
@@ -78,7 +79,8 @@ events-mcp reextract --source NAME [--snapshot KEY]
 ```
 
 `import` upserts one JSON object per line (`title`, `dedupe_key`, `kind`, optional `summary`,
-`raw_text`, `url`, `starts_at`, `ends_at`, `city`, `status`, `venue: {name, city, address, lat, lon}`).
+`raw_text`, `url`, `starts_at`, `ends_at`, `registration_opens_at`, `registration_closes_at`, `tickets_url`, `city`, `status`,
+`venue: {name, city, address, lat, lon}`).
 The whole file is recorded as one `scrape_runs` row. Running the same import twice changes nothing
 except `last_seen`.
 
@@ -111,6 +113,15 @@ a year takes the nearest plausible one. `type: shop` sources default to `kind: s
 
 `search_events` and `upcoming` leave out `kind=sale` unless `kind` or `kinds` asks for it; `ending_soon` includes
 every kind.
+
+**Registration phase.** An item can carry the phase before the event: `registration_opens_at`, `registration_closes_at`
+and `tickets_url` (which may be another site). `starts_at`/`ends_at` stay the event's own window. Listings return a
+derived `registration_state`: `not_yet_open`, `open` or `closed`; it is absent when the item says nothing about
+registration. With no stated close, registration counts as open until the item ends. `search_events` and `upcoming`
+take `registration=<state>`. The LLM tier reads the fields from the page, the JSON-LD tier from schema.org `offers`
+(`validFrom`, `validThrough`, `url`); iCal, RSS, YouTube and the stored-selector tier do not carry them. A later run
+that does not state them keeps the stored values; a new date pair replaces the old pair as a whole. Registration data
+is usually on an event's own page, not on the listing the crawler reads, so expect it where the listing shows it.
 
 `render: browser` / `browser_stealth` fetch through a shared Chrome over CDP (`CDP_URL`, an IP: Chrome rejects
 hostnames), one fresh context per page, at most one at a time. Stealth is per context only (UA, locale, timezone,

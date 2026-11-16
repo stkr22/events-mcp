@@ -33,6 +33,9 @@ class Item:
     ends_at: datetime | None = None
     city: str | None = None
     status: str | None = None
+    registration_opens_at: datetime | None = None
+    registration_closes_at: datetime | None = None
+    tickets_url: str | None = None
     venue: dict[str, Any] | None = None
 
 
@@ -104,9 +107,11 @@ async def upsert_event(
     cur = await conn.execute(
         """
         INSERT INTO events AS e (source_id, venue_id, title, summary, raw_text, url, starts_at, ends_at,
-                                 city, kind, dedupe_key, status, embedding, embedding_model)
+                                 city, kind, dedupe_key, status, registration_opens_at,
+                                 registration_closes_at, tickets_url, embedding, embedding_model)
         VALUES (%(source_id)s, %(venue_id)s, %(title)s, %(summary)s, %(raw)s, %(url)s, %(starts_at)s,
-                %(ends_at)s, %(city)s, %(kind)s, %(dedupe_key)s, %(status)s, %(vec)s::vector,
+                %(ends_at)s, %(city)s, %(kind)s, %(dedupe_key)s, %(status)s, %(reg_opens)s, %(reg_closes)s,
+                %(tickets_url)s, %(vec)s::vector,
                 CASE WHEN %(vec)s::text IS NULL THEN NULL ELSE %(model)s::text END)
         ON CONFLICT ON CONSTRAINT events_source_dedupe_key DO UPDATE SET
             venue_id = EXCLUDED.venue_id,
@@ -119,6 +124,15 @@ async def upsert_event(
             city = EXCLUDED.city,
             kind = EXCLUDED.kind,
             status = EXCLUDED.status,
+            -- A cheaper tier that does not read registration must not erase what the LLM found. The two
+            -- dates move together (new pair, or the old pair), so the order check cannot be broken by a mix.
+            registration_opens_at = CASE
+                WHEN EXCLUDED.registration_opens_at IS NOT NULL OR EXCLUDED.registration_closes_at IS NOT NULL
+                THEN EXCLUDED.registration_opens_at ELSE e.registration_opens_at END,
+            registration_closes_at = CASE
+                WHEN EXCLUDED.registration_opens_at IS NOT NULL OR EXCLUDED.registration_closes_at IS NOT NULL
+                THEN EXCLUDED.registration_closes_at ELSE e.registration_closes_at END,
+            tickets_url = coalesce(EXCLUDED.tickets_url, e.tickets_url),
             last_seen = now(),
             embedding = CASE
                 WHEN EXCLUDED.embedding IS NOT NULL THEN EXCLUDED.embedding
@@ -145,6 +159,9 @@ async def upsert_event(
             "kind": item.kind,
             "dedupe_key": item.dedupe_key,
             "status": item.status,
+            "reg_opens": item.registration_opens_at,
+            "reg_closes": item.registration_closes_at,
+            "tickets_url": item.tickets_url,
             "vec": vec,
             "model": embedding_model,
         },

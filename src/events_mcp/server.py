@@ -6,7 +6,7 @@ import hmac
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -22,7 +22,7 @@ from events_mcp.config import Settings
 from events_mcp.db import Pool, make_pool, migrate_with_retry
 from events_mcp.embeddings import Embedder, OpenAIEmbedder
 from events_mcp.metrics import Metrics
-from events_mcp.queries import Filters, Kind, parse_when
+from events_mcp.queries import Filters, Kind, RegistrationState, parse_when
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,9 @@ INSTRUCTIONS = """\
 Scraped listings of local venue events, museum exhibitions and YouTube channel videos.
 - "What's on <when> in <city>": search_events with date_from/date_to (bare dates are local days) and city,
   or upcoming(city, days) for a plain calendar.
+- "What can I still book / register for": search_events or upcoming with registration="open"; "what opens or
+  closes soon": registration_deadlines(days, which="closing"|"opening"). An item whose registration is not
+  mentioned has no registration fields; that does not mean it is free or open.
 - "Which exhibitions end soon": ending_soon(city, days, kind="exhibition").
 - "Is <label> on sale": search_events(kind="sale", source=<label>), or ending_soon for sales about to end.
   Sales are left out of search_events and upcoming unless kind or kinds asks for them.
@@ -115,6 +118,10 @@ def build_mcp(state: State) -> FastMCP:
             Field(description="Several kinds at once; without kind or kinds, sales are left out"),
         ] = None,
         source: Annotated[str | None, Field(description="Substring of a source or venue name")] = None,
+        registration: Annotated[
+            RegistrationState | None,
+            Field(description="not_yet_open, open or closed; items without registration info never match"),
+        ] = None,
         new_since: Annotated[str | None, Field(description="Only items first seen at or after this date")] = None,
         include_ended: Annotated[bool, Field(description="Include past items when no date range is given")] = False,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
@@ -135,6 +142,7 @@ def build_mcp(state: State) -> FastMCP:
                 date_from=parse_when(date_from, tz),
                 date_to=parse_when(date_to, tz, end_of_day=True),
                 source=source,
+                registration=registration,
                 new_since=parse_when(new_since, tz),
                 include_ended=include_ended,
             )
@@ -155,6 +163,10 @@ def build_mcp(state: State) -> FastMCP:
             list[Kind] | None,
             Field(description="Several kinds at once; without kind or kinds, sales are left out"),
         ] = None,
+        registration: Annotated[
+            RegistrationState | None,
+            Field(description="not_yet_open, open or closed; items without registration info never match"),
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
     ) -> dict[str, Any]:
         """Items running now or starting within the next `days` days, earliest first.
@@ -165,7 +177,13 @@ def build_mcp(state: State) -> FastMCP:
         async def run() -> dict[str, Any]:
             rows = await queries.upcoming(
                 state.pool,
-                Filters(city=city, kind=kind, kinds=list(kinds) if kinds else None, exclude_sales=True),
+                Filters(
+                    city=city,
+                    kind=kind,
+                    kinds=list(kinds) if kinds else None,
+                    exclude_sales=True,
+                    registration=registration,
+                ),
                 days,
                 tz,
                 limit,
@@ -188,6 +206,31 @@ def build_mcp(state: State) -> FastMCP:
             return {"count": len(rows), "results": rows}
 
         return await counted("ending_soon", run)
+
+    @mcp.tool()
+    async def registration_deadlines(
+        city: Annotated[str | None, Field(description="Exact city name, case-insensitive")] = None,
+        days: Annotated[int, Field(ge=1, le=366, description="Window in days")] = 14,
+        which: Annotated[
+            Literal["closing", "opening"],
+            Field(description="closing: registration or ticket sales end in the window; opening: they start"),
+        ] = "closing",
+        kind: Annotated[Kind | None, Field(description="One of event, exhibition, video, sale, other")] = None,
+        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+    ) -> dict[str, Any]:
+        """Items whose stated registration / ticket-sale window closes (or opens) within `days`, soonest first.
+
+        Only items that state a date appear. Ended and cancelled ones are left out, and so are sales unless
+        kind="sale". `tickets_url` says where to register or buy.
+        """
+
+        async def run() -> dict[str, Any]:
+            rows = await queries.registration_deadlines(
+                state.pool, Filters(city=city, kind=kind, exclude_sales=True), days, which, tz, limit
+            )
+            return {"count": len(rows), "results": rows}
+
+        return await counted("registration_deadlines", run)
 
     @mcp.tool()
     async def get_event(event_id: Annotated[int, Field(description="id from a listing result")]) -> dict[str, Any]:

@@ -165,6 +165,9 @@ def _jsonl(item: Item, venue: VenueRef | None) -> dict[str, Any]:
         "ends_at": item.ends_at.isoformat() if item.ends_at else None,
         "city": item.city,
         "status": item.status,
+        "registration_opens_at": item.registration_opens_at.isoformat() if item.registration_opens_at else None,
+        "registration_closes_at": item.registration_closes_at.isoformat() if item.registration_closes_at else None,
+        "tickets_url": item.tickets_url,
         "venue": venue.model_dump(exclude_none=True) if venue else None,
     }
     return {k: v for k, v in out.items() if v is not None}

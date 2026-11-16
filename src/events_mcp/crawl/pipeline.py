@@ -31,6 +31,7 @@ def build_items(
         if r.starts_at and r.ends_at and r.ends_at < r.starts_at:
             rejected += 1
             continue
+        opens, closes = _registration(r, now)
         venue = source.venue.model_dump() if source.venue else None
         ref = VenueRef.model_validate(venue) if venue else r.venue
         key = make_dedupe_key(
@@ -54,6 +55,9 @@ def build_items(
             ends_at=r.ends_at,
             city=city,
             status=r.status,
+            registration_opens_at=opens,
+            registration_closes_at=closes,
+            tickets_url=r.tickets_url,
         )
         out[key] = (item, ref)
     return list(out.values()), rejected
@@ -87,3 +91,19 @@ def stabilize_keys(
             taken.add(candidates[0])
             adopted += 1
     return adopted
+
+
+def _registration(r: RawItem, now: datetime) -> tuple[datetime | None, datetime | None]:
+    """Return the registration window, or ``(None, None)`` when it is implausible.
+
+    Only dropped, never a reason to reject the item: the event itself is still good. A pair that is
+    out of order, or a date outside the window the event dates are held to, is more likely a
+    mis-read than a fact.
+    """
+    opens, closes = r.registration_opens_at, r.registration_closes_at
+    low, high = now - timedelta(days=366), now + timedelta(days=731)
+    if any(d is not None and not low <= d <= high for d in (opens, closes)):
+        return None, None
+    if opens and closes and closes < opens:
+        return None, None
+    return opens, closes

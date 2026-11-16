@@ -53,6 +53,9 @@ def _item(obj: dict[str, Any]) -> Item:
         ends_at=_parse_dt(obj.get("ends_at")),
         city=obj.get("city"),
         status=obj.get("status"),
+        registration_opens_at=_parse_dt(obj.get("registration_opens_at")),
+        registration_closes_at=_parse_dt(obj.get("registration_closes_at")),
+        tickets_url=obj.get("tickets_url"),
         venue=obj.get("venue"),
     )
 

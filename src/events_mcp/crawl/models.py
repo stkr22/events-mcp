@@ -37,6 +37,9 @@ class RawItem(BaseModel):
     starts_at: datetime | None = None
     ends_at: datetime | None = None
     status: Status | None = None
+    registration_opens_at: datetime | None = None
+    registration_closes_at: datetime | None = None
+    tickets_url: str | None = None
     venue: VenueRef | None = None
     native_id: str | None = None
     """Stable id from the source (iCal UID + occurrence, videoId, JSON-LD @id); beats every other key."""
