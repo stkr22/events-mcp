@@ -27,6 +27,11 @@ FROM docker.io/library/python:3.14.7-slim-trixie@sha256:ce40764625a4ff50df354827
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# Playwright's bundled node driver links libatomic (it only drives Chrome over CDP, no browsers here).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN addgroup --system --gid 1001 appuser && adduser --system --uid 1001 --no-create-home --ingroup appuser appuser
 
 WORKDIR /app
