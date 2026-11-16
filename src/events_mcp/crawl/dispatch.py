@@ -2,6 +2,7 @@
 
 import logging
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
 from selectolax.parser import HTMLParser
@@ -11,8 +12,11 @@ from events_mcp.crawl.extractors import Context
 from events_mcp.crawl.extractors.feeds import extract_rss, extract_youtube
 from events_mcp.crawl.extractors.ical import extract_ical
 from events_mcp.crawl.extractors.jsonld import extract_jsonld
-from events_mcp.crawl.fetch import Fetcher
+from events_mcp.crawl.fetch import Fetcher, FetchError
 from events_mcp.crawl.models import Extraction, Page
+
+if TYPE_CHECKING:
+    from events_mcp.crawl.browser import BrowserFetcher
 from events_mcp.crawl.normalize import same_site
 
 log = logging.getLogger(__name__)
@@ -40,10 +44,22 @@ def discover_alternates(page: Page) -> list[str]:
     return found
 
 
-async def fetch_pages(source: ResolvedSource, fetcher: Fetcher, *, etag: str | None = None) -> list[Page]:
-    """Fetch the listing pages, politely. A conditional 304 on a single-page source returns ``[]``."""
+async def fetch_pages(
+    source: ResolvedSource, fetcher: Fetcher, browser: BrowserFetcher | None = None, *, etag: str | None = None
+) -> list[Page]:
+    """Fetch the listing pages, politely (robots and pacing apply to browser renders too)."""
     pages: list[Page] = []
     for n, url in enumerate(source.fetch_urls):
+        if source.render != "http":
+            if browser is None:
+                raise FetchError("render: browser needs CDP_URL")
+            await fetcher.check(url, rps=source.politeness.rps, ignore_robots=source.politeness.ignore_robots)
+            pages.append(
+                await browser.get(
+                    url, stealth=source.render == "browser_stealth", wait_for_selector=source.wait_for_selector
+                )
+            )
+            continue
         page = await fetcher.get(
             url,
             rps=source.politeness.rps,
@@ -55,7 +71,7 @@ async def fetch_pages(source: ResolvedSource, fetcher: Fetcher, *, etag: str | N
     return pages
 
 
-async def extract(
+async def structured(
     source: ResolvedSource,
     pages: list[Page],
     fetcher: Fetcher,
@@ -63,10 +79,10 @@ async def extract(
     *,
     only: str | None = None,
     preferred: str | None = None,
-) -> Extraction:
-    """Run the tiers in order (``only`` forces one, ``preferred`` goes first) and return the first hit."""
-    if only and only != "auto" and only not in _EXTRACTORS:
-        raise NoExtractorError(f"extractor {only!r} is not available in this version")
+) -> Extraction | None:
+    """Run the structured tiers in order (``only`` forces one, ``preferred`` goes first); ``None`` if none hits."""
+    if only in {"selectors", "llm"}:
+        return None  # not a structured tier: the caller goes straight to the text path
     order = [only] if only and only != "auto" else list(TIERS)
     if preferred in order:
         order.remove(preferred)
@@ -88,7 +104,6 @@ async def extract(
                     result = _EXTRACTORS[name]([extra], now_ctx)
                     if result is not None and result.items:
                         return result
-    raise NoExtractorError(
-        "no structured data (iCal, RSS/Atom, YouTube, schema.org Event) found; "
-        "the selector and LLM tiers are not enabled yet"
-    )
+    if only in _EXTRACTORS:
+        raise NoExtractorError(f"the {only} tier found nothing on this page")
+    return None

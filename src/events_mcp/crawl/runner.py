@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,14 +13,17 @@ from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
-from events_mcp.crawl.clean import content_hash
+from events_mcp.crawl.browser import BrowserFetcher
+from events_mcp.crawl.clean import apply_ignore_patterns, content_hash, html_to_markdown
 from events_mcp.crawl.config import CrawlerSettings, ResolvedSource, load_sources
-from events_mcp.crawl.dispatch import NoExtractorError, extract, fetch_pages
+from events_mcp.crawl.dispatch import NoExtractorError, fetch_pages, structured
 from events_mcp.crawl.extractors import Context
 from events_mcp.crawl.fetch import Fetcher, FetchError, RobotsBlockedError
 from events_mcp.crawl.geocode import Geocoder
-from events_mcp.crawl.models import VenueRef, canonical_payload
+from events_mcp.crawl.llm import BadOutputError, ChatClient, NoProviderError, build_chain, extract_with_llm
+from events_mcp.crawl.models import Page, VenueRef, canonical_payload
 from events_mcp.crawl.pipeline import build_items
+from events_mcp.crawl.snapshots import SnapshotStore, snapshot_key
 from events_mcp.db import connect
 from events_mcp.ingest import (
     Item,
@@ -163,31 +167,81 @@ def _jsonl(item: Item, venue: VenueRef | None) -> dict[str, Any]:
     return {k: v for k, v in out.items() if v is not None}
 
 
-async def dry_run_source(
-    source: ResolvedSource, fetcher: Fetcher, now: datetime, extractor: str | None
-) -> list[dict[str, Any]]:
-    """Fetch and extract one source; return the Phase 1 import records. Touches no database."""
-    tz = ZoneInfo(source.timezone)
-    pages = await fetch_pages(source, fetcher)
-    ctx = Context(source, tz, now)
-    result = await extract(source, pages, fetcher, ctx, only=extractor or source.extractor)
-    pairs, rejected = build_items(result.items, source, tz, now)
-    log.info(
-        "%s: tier %s, %d items, %d rejected", source.name, result.extractor, len(pairs), rejected + result.rejected
-    )
-    return [_jsonl(i, v) for i, v in pairs]
+@dataclass
+class Services:
+    """Everything a run needs besides the source: shared across the sources of one invocation."""
+
+    settings: CrawlerSettings
+    fetcher: Fetcher
+    browser: BrowserFetcher | None
+    geocoder: Geocoder | None
+    snapshots: SnapshotStore | None
+    chain: Sequence[ChatClient]
 
 
-async def _process(
-    dsn: str,
+def pages_to_text(pages: list[Page], ignore_patterns: list[str]) -> str:
+    """Join the cleaned markdown of every page, dropping volatile lines before hashing."""
+    parts = [html_to_markdown(p.text, p.url) if p.is_html else p.text.strip() for p in pages]
+    return apply_ignore_patterns("\n\n---\n\n".join(x for x in parts if x), ignore_patterns).strip()
+
+
+async def _store(
+    conn: AsyncConnection[Any],
+    source_id: int,
+    run_id: int,
+    pairs: list[tuple[Item, VenueRef | None]],
+    digest: str,
+    geocoder: Geocoder | None,
+) -> int:
+    """Upsert the items and record the extraction in one transaction. Returns the number of new items."""
+    new = 0
+    cache: dict[tuple[str, str | None], int] = {}
+    async with conn.transaction():
+        for item, ref in pairs:
+            venue_id = await _resolve_venue(conn, ref, geocoder, cache)
+            item_id, inserted = await upsert_event(conn, source_id, item)
+            if venue_id is not None:
+                await conn.execute("UPDATE events SET venue_id = %s WHERE id = %s", (venue_id, item_id))
+            new += int(inserted)
+        await mark_extracted(conn, source_id, digest, run_id)
+    return new
+
+
+async def _llm_path(
+    conn: AsyncConnection[Any],
+    svc: Services,
     source: ResolvedSource,
     source_id: int,
-    fetcher: Fetcher,
-    geocoder: Geocoder | None,
-    settings: CrawlerSettings,
-    *,
-    force: bool,
-    extractor: str | None,
+    run_id: int,
+    text: str,
+    digest: str,
+    now: datetime,
+    outcome: dict[str, Any],
+) -> None:
+    """Extract ``text`` with the provider chain and store the result; fills ``outcome``."""
+    tz = ZoneInfo(source.timezone)
+    try:
+        raw, rejected, usage = await extract_with_llm(
+            svc.chain, source, text, source.primary_url, tz, now, svc.settings.llm_chunk_chars
+        )
+    except NoProviderError as exc:
+        outcome.update(status="pending_extraction", error=str(exc))
+        return
+    outcome.update(llm_calls=usage.calls, llm_input_chars=usage.input_chars, llm_provider=usage.provider)
+    pairs, plausibility = build_items(raw, source, tz, now)
+    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder)
+    outcome.update(
+        status="success",
+        items_seen=len(pairs),
+        items_new=new,
+        items_updated=len(pairs) - new,
+        items_rejected=outcome.get("items_rejected", 0) + rejected + plausibility,
+        error="; ".join(usage.notes) or None,
+    )
+
+
+async def _process(  # noqa: PLR0915
+    dsn: str, source: ResolvedSource, source_id: int, svc: Services, *, force: bool, extractor: str | None
 ) -> str:
     """One source, one run. Never raises: every outcome lands in ``scrape_runs``."""
     tz = ZoneInfo(source.timezone)
@@ -197,34 +251,48 @@ async def _process(
         outcome: dict[str, Any] = {"status": "failed"}
         try:
             now = datetime.now(UTC)
-            pages = await fetch_pages(source, fetcher)
-            ctx = Context(source, tz, now, settings.horizon_days)
-            result = await extract(
-                source, pages, fetcher, ctx, only=extractor or source.extractor, preferred=state.last_extractor
-            )
-            pairs, rejected = build_items(result.items, source, tz, now)
-            digest = content_hash(canonical_payload(result.items))
-            outcome.update(extractor=result.extractor, content_hash=digest, items_rejected=rejected + result.rejected)
+            pages = await fetch_pages(source, svc.fetcher, svc.browser)
+            ctx = Context(source, tz, now, svc.settings.horizon_days)
+            only = extractor or source.extractor
+            result = await structured(source, pages, svc.fetcher, ctx, only=only, preferred=state.last_extractor)
             cur = await conn.execute("SELECT last_extracted_hash FROM sources WHERE id = %s", (source_id,))
             row = await cur.fetchone()
-            if row and row["last_extracted_hash"] == digest and not force:
-                touched = await touch_source(conn, source_id)
-                outcome.update(status="success", items_touched=touched, items_seen=len(pairs))
+            last_hash = row["last_extracted_hash"] if row else None
+            if result is not None:
+                pairs, rejected = build_items(result.items, source, tz, now)
+                digest = content_hash(canonical_payload(result.items))
+                outcome.update(
+                    extractor=result.extractor, content_hash=digest, items_rejected=rejected + result.rejected
+                )
+                if last_hash == digest and not force:
+                    touched = await touch_source(conn, source_id)
+                    outcome.update(status="success", items_touched=touched, items_seen=len(pairs))
+                else:
+                    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder)
+                    outcome.update(
+                        status="success", items_seen=len(pairs), items_new=new, items_updated=len(pairs) - new
+                    )
             else:
-                new = 0
-                cache: dict[tuple[str, str | None], int] = {}
-                async with conn.transaction():
-                    for item, ref in pairs:
-                        venue_id = await _resolve_venue(conn, ref, geocoder, cache)
-                        item_id, inserted = await upsert_event(conn, source_id, item)
-                        if venue_id is not None:
-                            await conn.execute("UPDATE events SET venue_id = %s WHERE id = %s", (venue_id, item_id))
-                        new += int(inserted)
-                    await mark_extracted(conn, source_id, digest, run_id)
-                outcome.update(status="success", items_seen=len(pairs), items_new=new, items_updated=len(pairs) - new)
+                text = pages_to_text(pages, source.ignore_patterns)
+                if not text:
+                    raise FetchError("the page has no extractable text")
+                digest = content_hash(text)
+                outcome.update(extractor="llm", content_hash=digest)
+                if last_hash == digest and not force:
+                    touched = await touch_source(conn, source_id)
+                    outcome.update(status="success", items_touched=touched)
+                else:
+                    if svc.snapshots is not None:
+                        key = snapshot_key(source.name, digest, now.date())
+                        try:
+                            await svc.snapshots.put(key, text)
+                            outcome["snapshot_key"] = key
+                        except Exception:
+                            log.exception("snapshot upload failed for %s; continuing without", source.name)
+                    await _llm_path(conn, svc, source, source_id, run_id, text, digest, now, outcome)
         except RobotsBlockedError as exc:
             outcome.update(status="blocked_robots", error=f"robots.txt disallows {exc}")
-        except (FetchError, NoExtractorError) as exc:
+        except (FetchError, NoExtractorError, BadOutputError) as exc:
             outcome.update(status="failed", error=str(exc)[:1000])
         except Exception as exc:
             log.exception("source %s crashed", source.name)
@@ -232,6 +300,57 @@ async def _process(
         await finish_run_detailed(conn, run_id, **outcome)
         log.info("%s: %s %s", source.name, outcome["status"], {k: v for k, v in outcome.items() if k != "status"})
         return outcome["status"]
+
+
+async def reextract(settings: CrawlerSettings, name: str, snapshot: str | None) -> int:
+    """Run the LLM tier again on a stored snapshot (prompt iteration without refetching)."""
+    sources = {s.name: s for s in load_sources(settings.sources_file)}
+    store = SnapshotStore.from_settings(settings)
+    if name not in sources or store is None or settings.database_url is None:
+        print("unknown source, or S3/DATABASE_URL not configured", file=sys.stderr)
+        return 2
+    key = snapshot or await store.latest(name)
+    if key is None:
+        print(f"no snapshot for {name}", file=sys.stderr)
+        return 2
+    text = await store.get(key)
+    svc = Services(settings, Fetcher(settings.user_agent), None, None, None, build_chain(settings))
+    dsn = settings.database_url.get_secret_value()
+    source = sources[name]
+    async with await connect(dsn) as conn:
+        ids = await sync_sources(conn, list(sources.values()))
+        run_id = await start_run(conn, ids[name])
+        outcome: dict[str, Any] = {"status": "failed", "extractor": "llm", "snapshot_key": key}
+        try:
+            await _llm_path(conn, svc, source, ids[name], run_id, text, content_hash(text), datetime.now(UTC), outcome)
+        except Exception as exc:
+            outcome.update(status="failed", error=f"{type(exc).__name__}: {exc}"[:1000])
+        outcome.setdefault("content_hash", content_hash(text))
+        await finish_run_detailed(conn, run_id, **outcome)
+    await svc.fetcher.aclose()
+    print(f"{key}: {outcome['status']} {outcome.get('error') or ''}")
+    return 0 if outcome["status"] == "success" else 1
+
+
+async def dry_run_source(
+    source: ResolvedSource, svc: Services, now: datetime, extractor: str | None
+) -> list[dict[str, Any]]:
+    """Fetch and extract one source; return the Phase 1 import records. Touches no database and no S3."""
+    tz = ZoneInfo(source.timezone)
+    pages = await fetch_pages(source, svc.fetcher, svc.browser)
+    ctx = Context(source, tz, now)
+    result = await structured(source, pages, svc.fetcher, ctx, only=extractor or source.extractor)
+    if result is not None:
+        raw, rejected, tier = result.items, result.rejected, result.extractor
+    else:
+        text = pages_to_text(pages, source.ignore_patterns)
+        raw, llm_rejected, usage = await extract_with_llm(
+            svc.chain, source, text, source.primary_url, tz, now, svc.settings.llm_chunk_chars
+        )
+        rejected, tier = llm_rejected, f"llm ({usage.provider}, {usage.calls} calls)"
+    pairs, plausibility = build_items(raw, source, tz, now)
+    log.info("%s: tier %s, %d items, %d rejected", source.name, tier, len(pairs), rejected + plausibility)
+    return [_jsonl(i, v) for i, v in pairs]
 
 
 async def scrape(
@@ -253,36 +372,39 @@ async def scrape(
         print(f"unknown source(s): {', '.join(sorted(missing))}", file=sys.stderr)
         return 2
 
-    fetcher = Fetcher(settings.user_agent)
+    svc = Services(
+        settings,
+        Fetcher(settings.user_agent),
+        BrowserFetcher(settings.cdp_url, settings.user_agent) if settings.cdp_url else None,
+        Geocoder(settings.geocoder_url, settings.user_agent) if settings.geocode and not dry_run else None,
+        None if dry_run else SnapshotStore.from_settings(settings),
+        build_chain(settings),
+    )
     try:
         if dry_run:
             now = datetime.now(UTC)
             for s in selected:
                 try:
-                    for rec in await dry_run_source(s, fetcher, now, extractor):
+                    for rec in await dry_run_source(s, svc, now, extractor):
                         print(json.dumps(rec, ensure_ascii=False))
-                except (FetchError, RobotsBlockedError, NoExtractorError) as exc:
+                except (FetchError, RobotsBlockedError, NoExtractorError, NoProviderError, BadOutputError) as exc:
                     log.error("%s: %s", s.name, exc)
             return 0
-        return await _scrape_live(settings, sources, selected, fetcher, force=force, extractor=extractor)
+        return await _scrape_live(svc, sources, selected, force=force, extractor=extractor)
     finally:
-        await fetcher.aclose()
+        await svc.fetcher.aclose()
+        if svc.geocoder:
+            await svc.geocoder.aclose()
 
 
 async def _scrape_live(
-    settings: CrawlerSettings,
-    sources: list[ResolvedSource],
-    selected: list[ResolvedSource],
-    fetcher: Fetcher,
-    *,
-    force: bool,
-    extractor: str | None,
+    svc: Services, sources: list[ResolvedSource], selected: list[ResolvedSource], *, force: bool, extractor: str | None
 ) -> int:
+    settings = svc.settings
     if settings.database_url is None:
         log.error("DATABASE_URL is not set")
         return 2
     dsn = settings.database_url.get_secret_value()
-    geocoder = Geocoder(settings.geocoder_url, settings.user_agent) if settings.geocode else None
     try:
         async with await connect(dsn) as conn:
             ids = await sync_sources(conn, sources)
@@ -296,6 +418,11 @@ async def _scrape_live(
         log.exception("database unavailable or schema not migrated")
         return 1
     log.info("%d of %d sources due", len(due), len(selected))
+    if svc.snapshots is not None:
+        try:
+            await svc.snapshots.prune()
+        except Exception:
+            log.exception("snapshot pruning failed")
 
     sem = asyncio.Semaphore(settings.max_concurrency)
     host_locks: dict[str, asyncio.Lock] = {}
@@ -303,23 +430,18 @@ async def _scrape_live(
     async def one(s: ResolvedSource) -> str:
         host = urlparse(s.primary_url).hostname or s.name
         async with sem, host_locks.setdefault(host, asyncio.Lock()):
+            limit = s.timeout_sec or settings.source_timeout_sec
             try:
-                async with asyncio.timeout(settings.source_timeout_sec):
-                    return await _process(
-                        dsn, s, ids[s.name], fetcher, geocoder, settings, force=force, extractor=extractor
-                    )
+                async with asyncio.timeout(limit):
+                    return await _process(dsn, s, ids[s.name], svc, force=force, extractor=extractor)
             except TimeoutError:
                 async with await connect(dsn) as conn:
                     await conn.execute(
                         "UPDATE scrape_runs SET status='failed', finished_at=now(), error=%s "
                         "WHERE source_id=%s AND status='running'",
-                        (f"timed out after {settings.source_timeout_sec:.0f}s", ids[s.name]),
+                        (f"timed out after {limit:.0f}s", ids[s.name]),
                     )
                 return "failed"
 
-    try:
-        await asyncio.gather(*(one(s) for s in due))
-    finally:
-        if geocoder:
-            await geocoder.aclose()
+    await asyncio.gather(*(one(s) for s in due))
     return 0

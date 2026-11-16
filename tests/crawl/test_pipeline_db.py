@@ -10,7 +10,7 @@ from psycopg.rows import DictRow
 
 from events_mcp.crawl.config import CrawlerSettings
 from events_mcp.crawl.fetch import Fetcher
-from events_mcp.crawl.runner import _process, close_stuck_runs, sync_sources
+from events_mcp.crawl.runner import Services, _process, close_stuck_runs, sync_sources
 from events_mcp.db import ensure_crawler_grants
 from events_mcp.ingest import touch_source
 from events_mcp.metrics import Metrics
@@ -61,9 +61,7 @@ async def run(web: Web, settings: CrawlerSettings, source_id: int, **kw: object)
             settings.database_url.get_secret_value(),
             make_source(url="https://club.example/events.ics", extractor="ical", **kw),
             source_id,
-            fetcher,
-            None,
-            settings,
+            Services(settings, fetcher, None, None, None, []),
             force=False,
             extractor=None,
         )
@@ -141,7 +139,7 @@ async def test_pending_or_failed_runs_do_not_touch_or_mark(
     assert await run(web, settings, sid) == "failed"
     cur = await conn.execute("SELECT last_extracted_hash, last_extracted_at FROM sources")
     assert await cur.fetchone() == {"last_extracted_hash": None, "last_extracted_at": None}
-    assert "no structured data" in (await runs(conn))[0]["error"]
+    assert "found nothing" in (await runs(conn))[0]["error"]
 
 
 async def test_robots_block_is_its_own_status(

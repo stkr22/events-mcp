@@ -109,6 +109,10 @@ def _scrape(args: argparse.Namespace) -> int:
     settings = CrawlerSettings()
     if args.config:
         settings.sources_file = args.config
+    if args.command == "reextract":
+        from events_mcp.crawl.runner import reextract  # noqa: PLC0415
+
+        return asyncio.run(reextract(settings, args.source, args.snapshot))
     return asyncio.run(
         scrape(settings, names=args.sources, force=args.force, dry_run=args.dry_run, extractor=args.extractor)
     )
@@ -134,11 +138,15 @@ def main(argv: list[str] | None = None) -> None:
     sc.add_argument("--force", action="store_true", help="ignore the due check and hash gating")
     sc.add_argument("--dry-run", action="store_true", help="print JSONL to stdout; write nothing")
     sc.add_argument("--extractor", help="override the tier (ical, rss, youtube, jsonld)")
+    rx = sub.add_parser("reextract", help="rerun the LLM tier on a stored snapshot")
+    rx.add_argument("--source", required=True)
+    rx.add_argument("--snapshot", help="snapshot key (default: the newest)")
+    rx.add_argument("--config", type=Path)
     bf = sub.add_parser("backfill-embeddings", help="embed items missing a vector from the configured model")
     bf.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
 
-    if args.command == "scrape":
+    if args.command in {"scrape", "reextract"}:
         sys.exit(_scrape(args))
     settings = get_settings()
     match args.command:

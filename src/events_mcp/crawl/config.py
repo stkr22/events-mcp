@@ -98,6 +98,8 @@ class Source(_Strict):
     wait_for_selector: str | None = None
     max_llm_calls: int = 10
     max_input_chars: int = 150_000
+    timeout_sec: Annotated[int, Field(ge=30, le=3000)] | None = None
+    """Hard limit for one run of this source; default is the crawler-wide 300 s."""
 
     @field_validator("name")
     @classmethod
@@ -218,3 +220,23 @@ class CrawlerSettings(BaseSettings):
     source_timeout_sec: float = 300.0
     max_concurrency: int = 4
     horizon_days: int = 120
+
+    cdp_url: str | None = None
+    """Chrome DevTools endpoint for render: browser. Must be an IP: Chrome rejects other Host headers."""
+
+    llm_provider_order: str = "mac,gemini"
+    llm_mac_base_url: str | None = None
+    llm_mac_model: str | None = None
+    llm_gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_gemini_model: str | None = None
+    gemini_api_key: SecretStr | None = None
+    llm_mac_timeout_sec: float = 180.0
+    llm_gemini_timeout_sec: float = 60.0
+    llm_chunk_chars: int = 24_000
+
+    s3_endpoint: str | None = None
+    s3_bucket: str | None = None
+    s3_region: str = "garage"
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: SecretStr | None = None
+    snapshot_retention_days: int = 90
