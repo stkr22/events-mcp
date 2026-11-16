@@ -12,17 +12,20 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from events_mcp.crawl.browser import BrowserFetcher
 from events_mcp.crawl.clean import apply_ignore_patterns, content_hash, html_to_markdown
 from events_mcp.crawl.config import CrawlerSettings, ResolvedSource, load_sources
 from events_mcp.crawl.dispatch import NoExtractorError, fetch_pages, structured
 from events_mcp.crawl.extractors import Context
+from events_mcp.crawl.extractors.selectors import SelectorSchema, extract_selectors, healthy
 from events_mcp.crawl.fetch import Fetcher, FetchError, RobotsBlockedError
 from events_mcp.crawl.geocode import Geocoder
 from events_mcp.crawl.llm import BadOutputError, ChatClient, NoProviderError, build_chain, extract_with_llm
-from events_mcp.crawl.models import Page, VenueRef, canonical_payload
+from events_mcp.crawl.models import Extraction, Page, RawItem, VenueRef, canonical_payload
 from events_mcp.crawl.pipeline import build_items
+from events_mcp.crawl.selector_gen import MIN_ITEMS, generate_selectors
 from events_mcp.crawl.snapshots import SnapshotStore, snapshot_key
 from events_mcp.db import connect
 from events_mcp.ingest import (
@@ -217,8 +220,8 @@ async def _llm_path(
     digest: str,
     now: datetime,
     outcome: dict[str, Any],
-) -> None:
-    """Extract ``text`` with the provider chain and store the result; fills ``outcome``."""
+) -> list[RawItem]:
+    """Extract ``text`` with the provider chain and store the result; fills ``outcome``. Returns the kept items."""
     tz = ZoneInfo(source.timezone)
     try:
         raw, rejected, usage = await extract_with_llm(
@@ -226,7 +229,7 @@ async def _llm_path(
         )
     except NoProviderError as exc:
         outcome.update(status="pending_extraction", error=str(exc))
-        return
+        return []
     outcome.update(llm_calls=usage.calls, llm_input_chars=usage.input_chars, llm_provider=usage.provider)
     pairs, plausibility = build_items(raw, source, tz, now)
     new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder)
@@ -238,9 +241,56 @@ async def _llm_path(
         items_rejected=outcome.get("items_rejected", 0) + rejected + plausibility,
         error="; ".join(usage.notes) or None,
     )
+    return raw
 
 
-async def _process(  # noqa: PLR0915
+async def _try_selectors(
+    conn: AsyncConnection[Any], source: ResolvedSource, source_id: int, pages: list[Page], stored: Any, ctx: Context
+) -> Extraction | None:
+    """Replay the stored selectors; a schema that stopped working is dropped so the LLM can write a new one."""
+    try:
+        result = extract_selectors(pages, SelectorSchema.model_validate(stored), ctx)
+    except Exception:
+        log.exception("%s: stored selectors crashed", source.name)
+        result = None
+    if healthy(result):
+        return result
+    log.warning("%s: stored selectors stopped matching; falling back to the LLM and regenerating", source.name)
+    await conn.execute(
+        "UPDATE sources SET selector_schema = NULL, selector_schema_at = NULL WHERE id = %s", (source_id,)
+    )
+    return None
+
+
+async def _learn_selectors(
+    conn: AsyncConnection[Any],
+    svc: Services,
+    source: ResolvedSource,
+    source_id: int,
+    pages: list[Page],
+    kept: list[RawItem],
+    now: datetime,
+    outcome: dict[str, Any],
+) -> None:
+    """After a good LLM extraction of a listing, try to turn it into selectors so the next runs cost nothing."""
+    if len(kept) < MIN_ITEMS or not svc.chain:
+        return
+    try:
+        schema, provider = await generate_selectors(svc.chain, source, pages, kept, ZoneInfo(source.timezone), now)
+    except Exception:
+        log.exception("%s: selector generation crashed", source.name)
+        return
+    if provider:
+        outcome["llm_calls"] = outcome.get("llm_calls", 0) + 1
+    if schema is not None:
+        await conn.execute(
+            "UPDATE sources SET selector_schema = %s, selector_schema_at = now() WHERE id = %s",
+            (Jsonb(schema.model_dump()), source_id),
+        )
+        log.info("%s: stored a selector schema", source.name)
+
+
+async def _process(  # noqa: PLR0912, PLR0915
     dsn: str, source: ResolvedSource, source_id: int, svc: Services, *, force: bool, extractor: str | None
 ) -> str:
     """One source, one run. Never raises: every outcome lands in ``scrape_runs``."""
@@ -255,9 +305,14 @@ async def _process(  # noqa: PLR0915
             ctx = Context(source, tz, now, svc.settings.horizon_days)
             only = extractor or source.extractor
             result = await structured(source, pages, svc.fetcher, ctx, only=only, preferred=state.last_extractor)
-            cur = await conn.execute("SELECT last_extracted_hash FROM sources WHERE id = %s", (source_id,))
+            cur = await conn.execute(
+                "SELECT last_extracted_hash, selector_schema FROM sources WHERE id = %s", (source_id,)
+            )
             row = await cur.fetchone()
             last_hash = row["last_extracted_hash"] if row else None
+            stored_schema = row["selector_schema"] if row else None
+            if result is None and stored_schema and only in {None, "auto", "selectors"}:
+                result = await _try_selectors(conn, source, source_id, pages, stored_schema, ctx)
             if result is not None:
                 pairs, rejected = build_items(result.items, source, tz, now)
                 digest = content_hash(canonical_payload(result.items))
@@ -289,7 +344,9 @@ async def _process(  # noqa: PLR0915
                             outcome["snapshot_key"] = key
                         except Exception:
                             log.exception("snapshot upload failed for %s; continuing without", source.name)
-                    await _llm_path(conn, svc, source, source_id, run_id, text, digest, now, outcome)
+                    kept = await _llm_path(conn, svc, source, source_id, run_id, text, digest, now, outcome)
+                    if outcome["status"] == "success" and only in {None, "auto", "selectors"} and not result:
+                        await _learn_selectors(conn, svc, source, source_id, pages, kept, now, outcome)
         except RobotsBlockedError as exc:
             outcome.update(status="blocked_robots", error=f"robots.txt disallows {exc}")
         except (FetchError, NoExtractorError, BadOutputError) as exc:

@@ -31,6 +31,8 @@ Scraped listings of local venue events, museum exhibitions and YouTube channel v
 - "What's on <when> in <city>": search_events with date_from/date_to (bare dates are local days) and city,
   or upcoming(city, days) for a plain calendar.
 - "Which exhibitions end soon": ending_soon(city, days, kind="exhibition").
+- "Is <label> on sale": search_events(kind="sale", source=<label>), or ending_soon for sales about to end.
+  Sales are left out of search_events and upcoming unless kind or kinds asks for them.
 - "Anything new from <channel/venue>": search_events with source=<name> and new_since=<date>; list_sources
   shows the names.
 - Vague wishes ("something quiet and arty for a rainy day") go to search_events as the query; it is
@@ -107,7 +109,11 @@ def build_mcp(state: State) -> FastMCP:
         ] = None,
         date_to: Annotated[str | None, Field(description="ISO date or datetime; items starting by this")] = None,
         city: Annotated[str | None, Field(description="Exact city name, case-insensitive")] = None,
-        kind: Annotated[Kind | None, Field(description="event, exhibition or video")] = None,
+        kind: Annotated[Kind | None, Field(description="One of event, exhibition, video, sale, other")] = None,
+        kinds: Annotated[
+            list[Kind] | None,
+            Field(description="Several kinds at once; without kind or kinds, sales are left out"),
+        ] = None,
         source: Annotated[str | None, Field(description="Substring of a source or venue name")] = None,
         new_since: Annotated[str | None, Field(description="Only items first seen at or after this date")] = None,
         include_ended: Annotated[bool, Field(description="Include past items when no date range is given")] = False,
@@ -124,6 +130,8 @@ def build_mcp(state: State) -> FastMCP:
             filters = Filters(
                 city=city,
                 kind=kind,
+                kinds=list(kinds) if kinds else None,
+                exclude_sales=True,
                 date_from=parse_when(date_from, tz),
                 date_to=parse_when(date_to, tz, end_of_day=True),
                 source=source,
@@ -142,13 +150,26 @@ def build_mcp(state: State) -> FastMCP:
     async def upcoming(
         city: Annotated[str | None, Field(description="Exact city name, case-insensitive")] = None,
         days: Annotated[int, Field(ge=1, le=366, description="Look-ahead window in days")] = 7,
-        kind: Annotated[Kind | None, Field(description="event, exhibition or video")] = None,
+        kind: Annotated[Kind | None, Field(description="One of event, exhibition, video, sale, other")] = None,
+        kinds: Annotated[
+            list[Kind] | None,
+            Field(description="Several kinds at once; without kind or kinds, sales are left out"),
+        ] = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
     ) -> dict[str, Any]:
-        """Items running now or starting within the next `days` days, earliest first. Cancelled ones are left out."""
+        """Items running now or starting within the next `days` days, earliest first.
+
+        Cancelled ones are left out, and so are sales unless kind or kinds asks for them.
+        """
 
         async def run() -> dict[str, Any]:
-            rows = await queries.upcoming(state.pool, Filters(city=city, kind=kind), days, tz, limit)
+            rows = await queries.upcoming(
+                state.pool,
+                Filters(city=city, kind=kind, kinds=list(kinds) if kinds else None, exclude_sales=True),
+                days,
+                tz,
+                limit,
+            )
             return {"count": len(rows), "results": rows}
 
         return await counted("upcoming", run)
@@ -160,7 +181,7 @@ def build_mcp(state: State) -> FastMCP:
         kind: Annotated[Kind | None, Field(description="Usually exhibition")] = None,
         limit: Annotated[int, Field(ge=1, le=100)] = 50,
     ) -> dict[str, Any]:
-        """Items whose stated end date falls within the next `days` days, soonest first."""
+        """Items whose stated end date falls within the next `days` days, soonest first, sales included."""
 
         async def run() -> dict[str, Any]:
             rows = await queries.ending_soon(state.pool, Filters(city=city, kind=kind), days, tz, limit)

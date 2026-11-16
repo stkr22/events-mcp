@@ -144,6 +144,11 @@ class ResolvedSource(Source):
     timezone: str  # ty: ignore[incompatible-mutable-override]
 
     @property
+    def kind(self) -> str:
+        """``default_kind``, or ``sale`` for shops and ``event`` otherwise."""
+        return self.default_kind or ("sale" if self.type == "shop" else "event")
+
+    @property
     def primary_url(self) -> str:
         """The URL stored in ``sources.url`` (unique per source)."""
         if self.type == "youtube":

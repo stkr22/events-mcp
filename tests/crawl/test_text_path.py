@@ -42,7 +42,7 @@ def settings(schema: str) -> CrawlerSettings:
 
 
 def source(**kw: object):
-    return make_source(url="https://venue.example/programm", type="venue", **kw)
+    return make_source(**{"url": "https://venue.example/programm", "type": "venue", **kw})
 
 
 async def go(
