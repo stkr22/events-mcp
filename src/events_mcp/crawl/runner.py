@@ -24,7 +24,7 @@ from events_mcp.crawl.fetch import Fetcher, FetchError, RobotsBlockedError
 from events_mcp.crawl.geocode import Geocoder
 from events_mcp.crawl.llm import BadOutputError, ChatClient, NoProviderError, build_chain, extract_with_llm
 from events_mcp.crawl.models import Extraction, Page, RawItem, VenueRef, canonical_payload
-from events_mcp.crawl.pipeline import build_items
+from events_mcp.crawl.pipeline import build_items, stabilize_keys
 from events_mcp.crawl.selector_gen import MIN_ITEMS, generate_selectors
 from events_mcp.crawl.snapshots import SnapshotStore, snapshot_key
 from events_mcp.db import connect
@@ -195,10 +195,15 @@ async def _store(
     pairs: list[tuple[Item, VenueRef | None]],
     digest: str,
     geocoder: Geocoder | None,
+    tz: ZoneInfo,
 ) -> int:
     """Upsert the items and record the extraction in one transaction. Returns the number of new items."""
     new = 0
     cache: dict[tuple[str, str | None], int] = {}
+    cur = await conn.execute("SELECT dedupe_key, title, starts_at FROM events WHERE source_id = %s", (source_id,))
+    existing = [(r["dedupe_key"], r["title"], r["starts_at"]) for r in await cur.fetchall()]
+    if adopted := stabilize_keys(pairs, existing, tz):
+        log.info("source %s: %d items kept their stored key across extraction tiers", source_id, adopted)
     async with conn.transaction():
         for item, ref in pairs:
             venue_id = await _resolve_venue(conn, ref, geocoder, cache)
@@ -232,7 +237,7 @@ async def _llm_path(
         return []
     outcome.update(llm_calls=usage.calls, llm_input_chars=usage.input_chars, llm_provider=usage.provider)
     pairs, plausibility = build_items(raw, source, tz, now)
-    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder)
+    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder, tz)
     outcome.update(
         status="success",
         items_seen=len(pairs),
@@ -323,7 +328,7 @@ async def _process(  # noqa: PLR0912, PLR0915
                     touched = await touch_source(conn, source_id)
                     outcome.update(status="success", items_touched=touched, items_seen=len(pairs))
                 else:
-                    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder)
+                    new = await _store(conn, source_id, run_id, pairs, digest, svc.geocoder, tz)
                     outcome.update(
                         status="success", items_seen=len(pairs), items_new=new, items_updated=len(pairs) - new
                     )

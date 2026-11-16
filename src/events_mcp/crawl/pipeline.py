@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from events_mcp.crawl.config import ResolvedSource
 from events_mcp.crawl.models import RawItem, VenueRef
-from events_mcp.crawl.normalize import make_dedupe_key
+from events_mcp.crawl.normalize import make_dedupe_key, norm_text
 from events_mcp.ingest import Item
 
 log = logging.getLogger(__name__)
@@ -57,3 +57,33 @@ def build_items(
         )
         out[key] = (item, ref)
     return list(out.values()), rejected
+
+
+def stabilize_keys(
+    pairs: list[tuple[Item, VenueRef | None]], existing: list[tuple[str, str, datetime | None]], tz: ZoneInfo
+) -> int:
+    """Keep a row's key when another tier (or a changed URL) would give the same listing a new one.
+
+    ``existing`` is ``(dedupe_key, title, starts_at)`` of the source's stored rows. A new item whose key is
+    unknown but whose normalised title and local start date match exactly one stored row takes that row's key,
+    so the upsert updates it instead of adding a duplicate. Returns the number of keys adopted.
+    """
+
+    def signature(title: str, starts_at: datetime | None) -> tuple[str, str]:
+        return norm_text(title), starts_at.astimezone(tz).date().isoformat() if starts_at else ""
+
+    known = {key for key, _, _ in existing}
+    by_signature: dict[tuple[str, str], list[str]] = {}
+    for key, title, starts_at in existing:
+        by_signature.setdefault(signature(title, starts_at), []).append(key)
+    taken = {item.dedupe_key for item, _ in pairs if item.dedupe_key in known}
+    adopted = 0
+    for item, _ in pairs:
+        if item.dedupe_key in known:
+            continue
+        candidates = by_signature.get(signature(item.title, item.starts_at), [])
+        if len(candidates) == 1 and candidates[0] not in taken:
+            item.dedupe_key = candidates[0]
+            taken.add(candidates[0])
+            adopted += 1
+    return adopted
