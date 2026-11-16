@@ -74,6 +74,7 @@ events-mcp import items.jsonl --source-name "Kunsthalle" --source-type museum \
     --source-url https://www.hamburger-kunsthalle.de --city Hamburg
 events-mcp backfill-embeddings
 events-mcp scrape [--config sources.yaml] [--source NAME ...] [--force] [--dry-run] [--extractor TIER]
+events-mcp reextract --source NAME [--snapshot KEY]
 ```
 
 `import` upserts one JSON object per line (`title`, `dedupe_key`, `kind`, optional `summary`,
@@ -92,6 +93,21 @@ Each page is fetched politely (per-host rate limit, robots.txt; a robots block i
 then run through the cheapest tier that yields items: iCal, RSS/Atom, YouTube channel feed, schema.org Event
 (JSON-LD/microdata). The result is hashed; an unchanged hash only bumps `last_seen` (`touch_source`) and costs
 no extraction. `--dry-run` prints the import records as JSONL and writes nothing: use it to onboard a source.
+
+Pages without structured data go through the **LLM tier**: cleaned markdown, hashed, then (only if the hash changed)
+chunked by heading and sent to an OpenAI-compatible provider chain (`LLM_PROVIDER_ORDER`, default `mac,gemini`: the Mac
+/ oMLX endpoint first, Gemini as fallback). The model only writes content fields; keys, validation and the write
+are code. Code-side guards reject titles that are not on the page (fuzzy match >= 90), implausible or unparseable
+dates, unknown kinds, and foreign URLs; rejections are counted in `scrape_runs.items_rejected`. If no provider
+answers, the run is `pending_extraction`: nothing is touched, nothing is marked extracted, and the next run retries.
+Budget per source: `max_llm_calls` (10) and `max_input_chars` (150000).
+
+`render: browser` / `browser_stealth` fetch through a shared Chrome over CDP (`CDP_URL`, an IP: Chrome rejects
+hostnames), one fresh context per page, at most one at a time. Stealth is per context only (UA, locale, timezone,
+init scripts); Chrome's launch flags are never changed. Robots rules and pacing apply to browser renders too.
+
+With `S3_*` set, the cleaned text is stored as `snapshots/<source>/<date>/<sha256>.md.zst` whenever the hash changes and
+pruned after 90 days; `reextract` reruns the LLM tier on the newest (or a given) snapshot.
 
 Environment: `DATABASE_URL` (or `EVENTS_DATABASE_URL`), `SOURCES_FILE`, `USER_AGENT`, `GEOCODER_URL`.
 The database role `events_crawler`, if it exists, is granted exactly the privileges it needs on every startup

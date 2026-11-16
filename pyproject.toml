@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "events-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server over a Postgres/pgvector store of scraped venue events, exhibitions and channel content."
 authors = [
     { name = "stkr22", email = "stkr22@github.com" }
@@ -45,6 +45,10 @@ crawl = [
     "icalendar~=6.3",
     "recurring-ical-events~=3.8",
     "extruct~=0.18",
+    "openai~=2.0",
+    "playwright~=1.55",
+    "rapidfuzz~=3.14",
+    "boto3~=1.40",
 ]
 
 [project.scripts]

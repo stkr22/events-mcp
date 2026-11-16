@@ -21,6 +21,8 @@ _CHALLENGE_MARKERS = (
     "_incapsula_resource",
     "akamai-bot",
     "px-captcha",
+    "establishing a secure connection",
+    "shield-challenge",
     "captcha-delivery",
 )
 
@@ -90,6 +92,12 @@ class Fetcher:
                     self._robots[origin] = Protego.parse(resp.text)
         rules = self._robots[origin]
         return rules is None or rules.can_fetch(url, self.user_agent)
+
+    async def check(self, url: str, *, rps: float, ignore_robots: bool) -> None:
+        """Raise ``RobotsBlockedError`` if robots.txt disallows ``url``; pace the request either way."""
+        if not ignore_robots and not await self._allowed(url, rps):
+            raise RobotsBlockedError(url)
+        await self._pace(urlparse(url).netloc, rps)
 
     async def get(
         self,
