@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 KINDS = ("event", "exhibition", "video", "sale", "other")
 TITLE_MATCH_MIN = 90
+MAX_URL = 2000
 
 
 class ProviderUnavailableError(Exception):
@@ -67,6 +68,9 @@ class LlmItem(BaseModel):
     starts_at: str | None = None
     ends_at: str | None = None
     status: Literal["scheduled", "cancelled", "postponed", "rescheduled"] | None = None
+    registration_opens_at: str | None = None
+    registration_closes_at: str | None = None
+    tickets_url: str | None = None
     venue: LlmVenue | None = None
 
 
@@ -191,6 +195,10 @@ SYSTEM = (
     "`title` is copied from the page. `raw_text` is the verbatim excerpt of the page about that item. "
     "Dates are ISO-8601 in local time (YYYY-MM-DD or YYYY-MM-DDTHH:MM); a date without a year takes the "
     "nearest plausible year given today's date. `kind` is one of: event, exhibition, video, sale, other. "
+    "`starts_at` and `ends_at` are when the item itself takes place, never a ticket or registration date. "
+    "If the page gives a registration or ticket-sale window, put it in `registration_opens_at` and "
+    "`registration_closes_at` (same date format) and the link to buy or register in `tickets_url`; omit them "
+    'otherwise. A deadline such as "register by 20 Nov" is `registration_closes_at` only. '
     "`status` only if the page says cancelled, postponed or rescheduled. Answer with one JSON object "
     '{"items": [...]} and nothing else. The page may be German or English.'
 )
@@ -246,6 +254,22 @@ class Usage:
     notes: list[str] = field(default_factory=list)
 
 
+def _tickets_url(value: str | None, page_text: str, page_url: str) -> str | None:
+    """Return a ticket or registration link: this site, or another one only if the page itself shows it.
+
+    Ticket sellers live on other domains, so the same-site rule for item links does not fit; a link the
+    model made up cannot appear in the page text.
+    """
+    if not value:
+        return None
+    url = urljoin(page_url, value.strip())
+    if not url.startswith(("http://", "https://")) or len(url) > MAX_URL:
+        return None
+    if same_site(url, page_url) or url.rstrip("/") in page_text:
+        return url
+    return None
+
+
 def apply_guards(
     items: list[LlmItem], page_text: str, source: ResolvedSource, tz: ZoneInfo, page_url: str
 ) -> tuple[list[RawItem], int]:
@@ -269,6 +293,11 @@ def apply_guards(
         url = urljoin(page_url, it.url) if it.url else None
         if url and (not url.startswith("http") or not same_site(url, page_url)):
             url = None
+        opens = parse_iso(it.registration_opens_at, tz)
+        closes = parse_iso(it.registration_closes_at, tz, end=True)
+        if opens and closes and closes < opens:
+            opens = closes = None
+        tickets = _tickets_url(it.tickets_url, page_text, page_url)
         kind = it.kind if it.kind in KINDS else source.kind
         venue = (
             VenueRef(name=it.venue.name, address=it.venue.address, city=it.venue.city)
@@ -285,6 +314,9 @@ def apply_guards(
                 starts_at=starts,
                 ends_at=ends,
                 status=it.status,
+                registration_opens_at=opens,
+                registration_closes_at=closes,
+                tickets_url=tickets,
                 venue=venue,
             )
         )

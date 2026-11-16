@@ -1,6 +1,7 @@
 """schema.org Event data (JSON-LD and microdata) through extruct."""
 
 from collections import Counter
+from datetime import datetime
 from typing import Any
 from urllib.parse import urljoin
 
@@ -87,6 +88,30 @@ def extract_jsonld(pages: list[Page], ctx: Context) -> Extraction | None:
     return Extraction("jsonld", items, rejected)
 
 
+def _offers(node: dict[str, Any], page: Page, ctx: Context) -> tuple[datetime | None, datetime | None, str | None]:
+    """Registration window and buy link from the event's schema.org ``offers``.
+
+    ``validFrom`` is when sales open, ``validThrough`` when they close. The link may point at another
+    site (a ticket seller): it is the publisher's own statement, so the same-site rule does not apply.
+    """
+    raw = node.get("offers")
+    offers = [o for o in (raw if isinstance(raw, list) else [raw]) if isinstance(o, dict)]
+    opens = [d for o in offers if (d := parse_iso(_text(o.get("validFrom")), ctx.tz))]
+    closes = [d for o in offers if (d := parse_iso(_text(o.get("validThrough")), ctx.tz, end=True))]
+    start, end = (min(opens) if opens else None), (max(closes) if closes else None)
+    if start and end and end < start:
+        start = end = None
+    url = None
+    for o in offers:
+        candidate = _text(_first(o.get("url")))
+        if candidate:
+            candidate = urljoin(page.url, candidate)
+            if candidate.startswith(("http://", "https://")):
+                url = candidate
+                break
+    return start, end, url
+
+
 def _item(node: dict[str, Any], page: Page, ctx: Context) -> RawItem | None:
     title = _text(node.get("name"))
     starts = parse_iso(_text(node.get("startDate")), ctx.tz)
@@ -104,6 +129,7 @@ def _item(node: dict[str, Any], page: Page, ctx: Context) -> RawItem | None:
     kinds = _types(node)
     kind = "exhibition" if any(t.endswith("ExhibitionEvent") for t in kinds) else ctx.default_kind
     native = node.get("@id")
+    opens, closes, tickets = _offers(node, page, ctx)
     return RawItem(
         title=title,
         kind=kind,  # ty: ignore[invalid-argument-type]
@@ -113,6 +139,9 @@ def _item(node: dict[str, Any], page: Page, ctx: Context) -> RawItem | None:
         starts_at=starts,
         ends_at=ends,
         status=map_status(_text(node.get("eventStatus"))),
+        registration_opens_at=opens,
+        registration_closes_at=closes,
+        tickets_url=tickets,
         venue=_venue(node.get("location"), ctx.source.city),
         native_id=native if isinstance(native, str) and native and not native.startswith("_:") else None,
     )

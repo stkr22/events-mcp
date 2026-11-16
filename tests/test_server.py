@@ -55,7 +55,14 @@ def test_auth_required(client: TestClient) -> None:
 
 def test_tools_listed(client: TestClient) -> None:
     tools = {t["name"] for t in rpc(client, "tools/list").json()["result"]["tools"]}
-    assert tools == {"search_events", "upcoming", "ending_soon", "get_event", "list_sources"}
+    assert tools == {
+        "search_events",
+        "upcoming",
+        "ending_soon",
+        "registration_deadlines",
+        "get_event",
+        "list_sources",
+    }
 
 
 def test_search_through_mcp(client: TestClient, seeded: dict[str, int]) -> None:

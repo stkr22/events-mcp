@@ -110,3 +110,18 @@ def test_canonical_payload_ignores_item_order(ctx: Context) -> None:
     assert result is not None
     items = result.items
     assert canonical_payload(items) == canonical_payload(list(reversed(items)))
+
+
+def test_jsonld_offers_give_the_registration_window_and_link(ctx: Context) -> None:
+    result = extract_jsonld([page("offers.html", "text/html")], ctx)
+    assert result is not None
+    by_title = {i.title: i for i in result.items}
+    fest = by_title["Sommerfest"]
+    assert fest.registration_opens_at is not None and fest.registration_closes_at is not None
+    assert fest.registration_opens_at.isoformat() == "2026-11-10T10:00:00+01:00"
+    assert fest.registration_closes_at.isoformat() == "2026-12-04T23:59:59+01:00"  # date-only: end of that day
+    assert fest.tickets_url == "https://tickets.example/sommerfest"  # another site, stated by the page itself
+    backwards = by_title["Backwards"]
+    assert (backwards.registration_opens_at, backwards.registration_closes_at) == (None, None)
+    plain = by_title["No offer"]
+    assert (plain.registration_opens_at, plain.registration_closes_at, plain.tickets_url) == (None, None, None)
