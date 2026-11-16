@@ -1,4 +1,4 @@
-"""Command line: ``serve`` (default), ``migrate``, ``import`` and ``backfill-embeddings``."""
+"""Command line: ``serve`` (default), ``migrate``, ``import``, ``backfill-embeddings`` and ``scrape``."""
 
 import argparse
 import asyncio
@@ -99,6 +99,21 @@ async def _backfill(settings: Settings, args: argparse.Namespace) -> None:
     print(f"embedded {n} items")
 
 
+def _scrape(args: argparse.Namespace) -> int:
+    try:
+        from events_mcp.crawl.config import CrawlerSettings  # noqa: PLC0415 - optional [crawl] dependencies
+        from events_mcp.crawl.runner import scrape  # noqa: PLC0415
+    except ImportError:
+        print("the crawler needs the [crawl] extra: pip install events-mcp[crawl]", file=sys.stderr)
+        return 2
+    settings = CrawlerSettings()
+    if args.config:
+        settings.sources_file = args.config
+    return asyncio.run(
+        scrape(settings, names=args.sources, force=args.force, dry_run=args.dry_run, extractor=args.extractor)
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     """Entry point."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -109,14 +124,22 @@ def main(argv: list[str] | None = None) -> None:
     imp = sub.add_parser("import", help="upsert a JSON-lines file of items for one source")
     imp.add_argument("file")
     imp.add_argument("--source-name", required=True)
-    imp.add_argument("--source-type", required=True, choices=["venue", "museum", "youtube", "feed"])
+    imp.add_argument("--source-type", required=True, choices=["venue", "museum", "youtube", "feed", "shop"])
     imp.add_argument("--source-url", required=True)
     imp.add_argument("--city")
     imp.add_argument("--no-embed", action="store_true", help="skip the embedding endpoint")
+    sc = sub.add_parser("scrape", help="fetch the sources in sources.yaml and upsert their items")
+    sc.add_argument("--config", type=Path, help="sources.yaml (default: $SOURCES_FILE)")
+    sc.add_argument("--source", action="append", dest="sources", help="only this source (repeatable)")
+    sc.add_argument("--force", action="store_true", help="ignore the due check and hash gating")
+    sc.add_argument("--dry-run", action="store_true", help="print JSONL to stdout; write nothing")
+    sc.add_argument("--extractor", help="override the tier (ical, rss, youtube, jsonld)")
     bf = sub.add_parser("backfill-embeddings", help="embed items missing a vector from the configured model")
     bf.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
 
+    if args.command == "scrape":
+        sys.exit(_scrape(args))
     settings = get_settings()
     match args.command:
         case None | "serve":

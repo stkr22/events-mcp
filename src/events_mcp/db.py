@@ -76,7 +76,10 @@ async def migrate_with_retry(dsn: str, attempts: int = 60, delay: float = 5.0) -
             await asyncio.sleep(delay)
             continue
         async with conn:
-            return await migrate(conn)
+            applied = await migrate(conn)
+            if await ensure_crawler_grants(conn):
+                log.info("granted privileges to role %s", CRAWLER_ROLE)
+            return applied
     raise RuntimeError("database never became reachable")
 
 
@@ -99,3 +102,21 @@ async def connect(dsn: str) -> AsyncConnection[DictRow]:
     """One autocommit connection with dict rows, for the CLI commands."""
     conn = await AsyncConnection.connect(dsn, row_factory=dict_row, autocommit=True)  # ty: ignore[invalid-argument-type]
     return cast("AsyncConnection[DictRow]", conn)
+
+
+CRAWLER_ROLE = "events_crawler"
+
+
+async def ensure_crawler_grants(conn: AsyncConnection[Any]) -> bool:
+    """Grant the crawler's database role the privileges it needs, if that role exists. Idempotent.
+
+    The role is created outside the migrations (a CNPG managed role), possibly after the first
+    migration run, so this runs on every startup instead of once. It gets no DELETE and no DDL.
+    """
+    cur = await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (CRAWLER_ROLE,))
+    if await cur.fetchone() is None:
+        return False
+    role = CRAWLER_ROLE
+    await conn.execute(f"GRANT SELECT, INSERT, UPDATE ON events, venues, sources, scrape_runs TO {role}")
+    await conn.execute(f"GRANT SELECT ON event_lifecycle TO {role}")
+    return True

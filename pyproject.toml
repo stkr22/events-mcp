@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "events-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MCP server over a Postgres/pgvector store of scraped venue events, exhibitions and channel content."
 authors = [
     { name = "stkr22", email = "stkr22@github.com" }
@@ -30,6 +30,21 @@ dependencies = [
     "psycopg[binary,pool]~=3.2",
     "pydantic-settings~=2.10",
     "uvicorn>=0.35",
+]
+
+[project.optional-dependencies]
+# The crawler (`events-mcp scrape`); the server image does not carry these.
+crawl = [
+    "httpx[http2]~=0.28",
+    "pyyaml~=6.0",
+    "protego~=0.5",
+    "trafilatura~=2.0",
+    "markdownify~=1.1",
+    "selectolax~=0.4",
+    "feedparser~=6.0",
+    "icalendar~=6.3",
+    "recurring-ical-events~=3.8",
+    "extruct~=0.18",
 ]
 
 [project.scripts]

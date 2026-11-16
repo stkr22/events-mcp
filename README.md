@@ -73,12 +73,29 @@ events-mcp migrate
 events-mcp import items.jsonl --source-name "Kunsthalle" --source-type museum \
     --source-url https://www.hamburger-kunsthalle.de --city Hamburg
 events-mcp backfill-embeddings
+events-mcp scrape [--config sources.yaml] [--source NAME ...] [--force] [--dry-run] [--extractor TIER]
 ```
 
 `import` upserts one JSON object per line (`title`, `dedupe_key`, `kind`, optional `summary`,
 `raw_text`, `url`, `starts_at`, `ends_at`, `city`, `status`, `venue: {name, city, address, lat, lon}`).
 The whole file is recorded as one `scrape_runs` row. Running the same import twice changes nothing
 except `last_seen`.
+
+## Crawler
+
+`events-mcp scrape` reads `sources.yaml` (`SOURCES_FILE`), upserts it into `sources` (sources dropped from the file are
+disabled, never deleted), and processes the due ones. Install with `pip install events-mcp[crawl]` or use the
+`ghcr.io/stkr22/events-mcp-crawler` image. A source is due when its `interval` has passed since the last success, or
+after a failed run on a 15 min / 30 min / 1 h backoff.
+
+Each page is fetched politely (per-host rate limit, robots.txt; a robots block is the run status `blocked_robots`),
+then run through the cheapest tier that yields items: iCal, RSS/Atom, YouTube channel feed, schema.org Event
+(JSON-LD/microdata). The result is hashed; an unchanged hash only bumps `last_seen` (`touch_source`) and costs
+no extraction. `--dry-run` prints the import records as JSONL and writes nothing: use it to onboard a source.
+
+Environment: `DATABASE_URL` (or `EVENTS_DATABASE_URL`), `SOURCES_FILE`, `USER_AGENT`, `GEOCODER_URL`.
+The database role `events_crawler`, if it exists, is granted exactly the privileges it needs on every startup
+of the server (`migrate`).
 
 ## Metrics
 
@@ -87,6 +104,7 @@ except `last_seen`.
 | `events_last_successful_scrape_timestamp_seconds{source}` | Newest successful `scrape_runs.finished_at` per source. A source that has never succeeded reports its creation time, so new sources get a grace period. Alert on `time() - …`. |
 | `events_items{kind,lifecycle}` | item counts |
 | `events_items_missing_embedding` | backfill backlog |
+| `events_source_scrape_interval_seconds{source}`, `events_scrape_last_status{source,status}`, `events_source_items{source,lifecycle}`, `events_pending_extraction_seconds{source}`, `events_llm_calls_24h{provider}` | crawler health, enabled sources only |
 | `events_db_up`, `events_embedding_endpoint_up` | refreshed every 60 s |
 | `events_mcp_tool_calls_total{tool,outcome}`, `events_mcp_searches_total{semantic}` | usage |
 
