@@ -199,7 +199,7 @@ SYSTEM = (
 def build_prompt(source: ResolvedSource, text: str, today: datetime, tz: ZoneInfo, schema: dict[str, Any]) -> str:
     """User message: source context, today's date, the schema and the page chunk."""
     parts = [
-        f"Source: {source.name} (type {source.type}). Default kind: {source.default_kind or 'event'}.",
+        f"Source: {source.name} (type {source.type}). Default kind: {source.kind}.",
         f"Today is {today.astimezone(tz):%A %Y-%m-%d}, timezone {source.timezone}.",
     ]
     if source.intent:
@@ -269,7 +269,7 @@ def apply_guards(
         url = urljoin(page_url, it.url) if it.url else None
         if url and (not url.startswith("http") or not same_site(url, page_url)):
             url = None
-        kind = it.kind if it.kind in KINDS else (source.default_kind or "event")
+        kind = it.kind if it.kind in KINDS else source.kind
         venue = (
             VenueRef(name=it.venue.name, address=it.venue.address, city=it.venue.city)
             if it.venue and it.venue.name
@@ -278,7 +278,7 @@ def apply_guards(
         out.append(
             RawItem(
                 title=title,
-                kind=kind,
+                kind=kind,  # ty: ignore[invalid-argument-type]
                 summary=(it.summary or "")[:500] or None,
                 raw_text=it.raw_text,
                 url=url,
@@ -291,7 +291,13 @@ def apply_guards(
     return out, rejected
 
 
-async def _ask(client: ChatClient, system: str, user: str, schema: dict[str, Any]) -> LlmResult:
+async def _ask[T: BaseModel](
+    client: ChatClient,
+    system: str,
+    user: str,
+    schema: dict[str, Any],
+    model: type[T] = LlmResult,  # ty: ignore[invalid-parameter-default]
+) -> T:
     """One chunk against one provider: json_schema first, JSON mode if rejected, one repair retry."""
     import openai  # noqa: PLC0415
 
@@ -307,7 +313,7 @@ async def _ask(client: ChatClient, system: str, user: str, schema: dict[str, Any
             use_schema = False  # the endpoint does not take json_schema: JSON mode plus validation
             raw = await client.complete(messages, schema, json_schema=False)
         try:
-            return LlmResult.model_validate_json(raw)
+            return model.model_validate_json(raw)
         except (ValidationError, ValueError) as exc:
             last_error = str(exc)[:500]
             messages = [
@@ -371,3 +377,23 @@ async def extract_with_llm(
             raise bad or NoProviderError("no LLM provider is available")
     items, rejected = apply_guards(gathered, text, source, tz, page_url)
     return items, rejected, usage
+
+
+async def ask_model[T: BaseModel](chain: Sequence[ChatClient], system: str, user: str, model: type[T]) -> tuple[T, str]:
+    """One structured question through the chain. Returns ``(answer, provider name)``.
+
+    Same fallthrough as ``extract_with_llm``: unavailable providers are skipped, unusable output moves
+    on to the next provider, and ``NoProviderError`` / ``BadOutputError`` say why nothing came back.
+    """
+    schema = model.model_json_schema()
+    bad: BadOutputError | None = None
+    for client in chain:
+        if not await client.available():
+            continue
+        try:
+            return await _ask(client, system, user, schema, model), client.name
+        except ProviderUnavailableError:
+            continue
+        except BadOutputError as exc:
+            bad = exc
+    raise bad or NoProviderError("no LLM provider is available")

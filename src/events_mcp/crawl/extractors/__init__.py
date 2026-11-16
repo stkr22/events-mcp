@@ -19,4 +19,4 @@ class Context:
     @property
     def default_kind(self) -> str:
         """The source's ``default_kind`` or ``event``."""
-        return self.source.default_kind or "event"
+        return self.source.kind

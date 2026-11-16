@@ -7,7 +7,7 @@ from psycopg.rows import DictRow
 
 from events_mcp import queries
 from events_mcp.db import Pool
-from events_mcp.ingest import backfill_embeddings
+from events_mcp.ingest import Item, backfill_embeddings, upsert_event, upsert_source
 from events_mcp.queries import Filters, parse_when
 
 from .conftest import FakeEmbedder, days
@@ -159,3 +159,25 @@ async def test_semantic_distance_cutoff(pool: Pool, seeded: dict[str, int]) -> N
     assert out["results"][0]["semantic_distance"] < 0.1
     out = await queries.search(pool, FakeEmbedder(), "science", Filters(), TZ, max_distance=2.0)
     assert len(out["results"]) == 5  # every non-ended item once the cutoff is off
+
+
+async def test_sales_hidden_by_default_but_in_ending_soon(pool: Pool, conn: AsyncConnection[DictRow]) -> None:
+    src = await upsert_source(conn, "label", "shop", "https://label.example/sale")
+    await upsert_event(
+        conn, src, Item(title="Winter Sale Mäntel", dedupe_key="s", kind="sale", starts_at=days(-2), ends_at=days(3))
+    )
+    await upsert_event(conn, src, Item(title="Eröffnung", dedupe_key="e", kind="event", starts_at=days(1)))
+
+    assert [r["kind"] for r in await queries.upcoming(pool, Filters(exclude_sales=True), 14, TZ)] == ["event"]
+    out = await queries.search(pool, None, "", Filters(exclude_sales=True), TZ)
+    assert [r["kind"] for r in out["results"]] == ["event"]
+    # Asking for sales by kind or kinds overrides the default.
+    only_sales = await queries.upcoming(pool, Filters(kind="sale", exclude_sales=True), 14, TZ)
+    assert [r["kind"] for r in only_sales] == ["sale"]
+    both = await queries.upcoming(pool, Filters(kinds=["sale", "event"], exclude_sales=True), 14, TZ)
+    assert sorted(r["kind"] for r in both) == ["event", "sale"]
+    # ending_soon never hides them: "does the sale end Sunday?"
+    ending = await queries.ending_soon(pool, Filters(), 7, TZ)
+    assert [r["kind"] for r in ending] == ["sale"]
+    with pytest.raises(ValueError, match="kinds"):
+        await queries.upcoming(pool, Filters(kinds=["party"]), 7, TZ)

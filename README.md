@@ -102,6 +102,16 @@ dates, unknown kinds, and foreign URLs; rejections are counted in `scrape_runs.i
 answers, the run is `pending_extraction`: nothing is touched, nothing is marked extracted, and the next run retries.
 Budget per source: `max_llm_calls` (10) and `max_input_chars` (150000).
 
+After a good LLM extraction of a listing (3 or more items) the crawler asks the LLM once for a CSS schema
+(`base_selector` plus `title`, `url`, `date_text` selectors, from the trimmed HTML) and keeps it only if replaying it
+reproduces at least 80% of the items the LLM found. From then on the **selectors tier** runs first and costs no LLM
+call. If it later matches nothing, or more than half of its matches have no title (a redesign), the schema is dropped,
+the LLM extracts again and writes a new one. Dates come from a day-first German/English date reader; a date without
+a year takes the nearest plausible one. `type: shop` sources default to `kind: sale`.
+
+`search_events` and `upcoming` leave out `kind=sale` unless `kind` or `kinds` asks for it; `ending_soon` includes
+every kind.
+
 `render: browser` / `browser_stealth` fetch through a shared Chrome over CDP (`CDP_URL`, an IP: Chrome rejects
 hostnames), one fresh context per page, at most one at a time. Stealth is per context only (UA, locale, timezone,
 init scripts); Chrome's launch flags are never changed. Robots rules and pacing apply to browser renders too.

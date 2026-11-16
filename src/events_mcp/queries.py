@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 from events_mcp.db import Pool
 from events_mcp.embeddings import Embedder, vector_literal
 
-Kind = Literal["event", "exhibition", "video"]
-KINDS: tuple[str, ...] = ("event", "exhibition", "video")
+Kind = Literal["event", "exhibition", "video", "sale", "other"]
+KINDS: tuple[str, ...] = ("event", "exhibition", "video", "sale", "other")
 
 # Reciprocal-rank-fusion constant; 60 is the usual choice and is insensitive in practice.
 RRF_K = 60
@@ -50,6 +50,9 @@ class Filters:
 
     city: str | None = None
     kind: str | None = None
+    kinds: list[str] | None = None
+    exclude_sales: bool = False
+    """Leave out kind=sale unless a kind filter names it: "what is on" is about events, not discounts."""
     date_from: datetime | None = None
     date_to: datetime | None = None
     source: str | None = None
@@ -66,6 +69,13 @@ class Filters:
                 raise ValueError(f"kind must be one of {', '.join(KINDS)}")
             clauses.append("l.kind = %(kind)s")
             p["kind"] = self.kind
+        elif self.kinds:
+            if bad := [k for k in self.kinds if k not in KINDS]:
+                raise ValueError(f"kinds must be among {', '.join(KINDS)}; got {', '.join(bad)}")
+            clauses.append("l.kind = ANY(%(kinds)s)")
+            p["kinds"] = self.kinds
+        elif self.exclude_sales:
+            clauses.append("l.kind <> 'sale'")
         if self.city:
             clauses.append("lower(l.city) = lower(%(city)s)")
             p["city"] = self.city.strip()
