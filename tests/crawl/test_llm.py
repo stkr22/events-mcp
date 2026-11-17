@@ -169,3 +169,12 @@ def test_guards_keep_registration_and_only_drop_what_is_wrong() -> None:
     assert second.tickets_url == "https://venue.example/buy"
     assert (third.registration_opens_at, third.registration_closes_at, third.tickets_url) == (None, None, None)
     assert (fourth.registration_closes_at, fourth.tickets_url) == (None, None)
+
+
+def test_prompt_separates_opening_from_closing_and_from_the_event() -> None:
+    from events_mcp.crawl.llm import SYSTEM  # noqa: PLC0415
+
+    # Measured on the production model: without cues for "opens" it returned only the deadline.
+    for cue in ("registration_opens_at", "registration_closes_at", "tickets_url", "Tickets ab", "Anmeldung bis"):
+        assert cue in SYSTEM
+    assert "never a ticket or registration date" in SYSTEM

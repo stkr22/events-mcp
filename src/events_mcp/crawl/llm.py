@@ -196,9 +196,11 @@ SYSTEM = (
     "Dates are ISO-8601 in local time (YYYY-MM-DD or YYYY-MM-DDTHH:MM); a date without a year takes the "
     "nearest plausible year given today's date. `kind` is one of: event, exhibition, video, sale, other. "
     "`starts_at` and `ends_at` are when the item itself takes place, never a ticket or registration date. "
-    "If the page gives a registration or ticket-sale window, put it in `registration_opens_at` and "
-    "`registration_closes_at` (same date format) and the link to buy or register in `tickets_url`; omit them "
-    'otherwise. A deadline such as "register by 20 Nov" is `registration_closes_at` only. '
+    "Registration or ticket sales come before the item and are separate dates. `registration_opens_at` is when "
+    'sales or registration START ("Tickets ab 1. Dezember", "Vorverkauf startet am 10.11.", "presale from", '
+    '"registration opens"). `registration_closes_at` is the deadline ("Anmeldung bis 30. November", '
+    '"register by", "Anmeldeschluss"). Fill each one the page states, either alone is fine, and never '
+    "invent the other. `tickets_url` is the link to buy or register. Omit all three when the page says nothing. "
     "`status` only if the page says cancelled, postponed or rescheduled. Answer with one JSON object "
     '{"items": [...]} and nothing else. The page may be German or English.'
 )
