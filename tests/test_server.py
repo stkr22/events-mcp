@@ -128,3 +128,12 @@ async def test_openai_embedder_breaker() -> None:
     assert await e.probe() is True  # probe closes it again
     assert await e.embed(["a", "b"]) == [[0.0] * 1024, [0.0] * 1024]
     await e.aclose()
+
+
+def test_the_instructions_tell_an_agent_that_films_are_events() -> None:
+    from events_mcp.server import INSTRUCTIONS, KIND_HELP  # noqa: PLC0415
+
+    # An agent asked for "movies" did not reach for the tools: nothing said a film listing is an event.
+    for word in ("film", "cinema", "concert", "theatre"):
+        assert word in INSTRUCTIONS.lower()
+    assert "films" in KIND_HELP

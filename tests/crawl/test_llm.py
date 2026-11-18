@@ -178,3 +178,11 @@ def test_prompt_separates_opening_from_closing_and_from_the_event() -> None:
     for cue in ("registration_opens_at", "registration_closes_at", "tickets_url", "Tickets ab", "Anmeldung bis"):
         assert cue in SYSTEM
     assert "never a ticket or registration date" in SYSTEM
+
+
+def test_prompt_demands_every_listing() -> None:
+    from events_mcp.crawl.llm import SYSTEM  # noqa: PLC0415
+
+    # Measured on the production model: the registration wording alone made it return 8 of 16 films
+    # on the Savoy page; this instruction brought all 16 back.
+    assert "extract EVERY listing" in SYSTEM
