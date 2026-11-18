@@ -15,6 +15,8 @@ class Me(BaseModel):
     name: str | None = None
     email: str | None = None
     oidc: bool = True
+    roles: list[str] = []
+    required_role: str | None = None
 
 
 class RunView(BaseModel):

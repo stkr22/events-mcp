@@ -46,27 +46,26 @@ async def test_nothing_without_signing_in(pool: Pool) -> None:
         assert (await c.post("/api/sources", json=CLUB)).status_code == 401
 
 
-async def test_a_signed_in_user_not_on_the_list_is_refused(pool: Pool) -> None:
+async def test_a_signed_in_user_without_the_role_is_refused(pool: Pool) -> None:
     secret = "s" * 40
     settings = AdminSettings(
         database_url="postgresql://x",
         oidc_issuer="https://id.example",
         oidc_client_id="cid",
         session_secret=secret,
-        admin_subjects="boss",
     )
     app = create_admin_app(settings, pool)
 
-    def cookie(sub: str) -> str:
-        data = base64.b64encode(json.dumps({"user": {"sub": sub, "name": "N", "email": None}}).encode())
+    def cookie(sub: str, roles: list[str]) -> str:
+        data = base64.b64encode(json.dumps({"user": {"sub": sub, "name": "N", "email": None, "roles": roles}}).encode())
         return TimestampSigner(secret).sign(data).decode()
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
-        c.cookies.set("events_admin", cookie("stranger"))
+        c.cookies.set("events_admin", cookie("stranger", ["viewer"]))  # some other role is not enough
         me = (await c.get("/api/me")).json()
-        assert me["authenticated"] and not me["admin"] and me["sub"] == "stranger"  # the UI shows this id
+        assert me["authenticated"] and not me["admin"] and me["required_role"] == "events-admin"  # the UI names it
         assert (await c.get("/api/sources")).status_code == 403
-        c.cookies.set("events_admin", cookie("boss"))
+        c.cookies.set("events_admin", cookie("boss", ["viewer", "events-admin"]))
         assert (await c.get("/api/sources")).status_code == 200
 
 

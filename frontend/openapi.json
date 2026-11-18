@@ -818,6 +818,25 @@
             "type": "boolean",
             "title": "Oidc",
             "default": true
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles",
+            "default": []
+          },
+          "required_role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Role"
           }
         },
         "type": "object",
@@ -1251,7 +1270,7 @@
           "type"
         ],
         "title": "Source",
-        "description": "One entry of ``sources.yaml`` with defaults applied."
+        "description": "One source as written: unset fields inherit the defaults when it is resolved."
       },
       "SourceDetail": {
         "properties": {

@@ -10,7 +10,7 @@ const onError = (error: unknown) => {
   // A lapsed session: drop back to the sign-in page without a reload.
   if (error instanceof ApiError && error.status === 401) {
     const prev = queryClient.getQueryData<Me>(['me']);
-    queryClient.setQueryData<Me>(['me'], { authenticated: false, admin: false, oidc: prev?.oidc ?? true });
+    queryClient.setQueryData<Me>(['me'], { authenticated: false, admin: false, roles: [], oidc: prev?.oidc ?? true });
   }
 };
 

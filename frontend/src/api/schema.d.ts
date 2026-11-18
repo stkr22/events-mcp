@@ -364,6 +364,13 @@ export interface components {
              * @default true
              */
             oidc: boolean;
+            /**
+             * Roles
+             * @default []
+             */
+            roles: string[];
+            /** Required Role */
+            required_role?: string | null;
         };
         /**
          * Options
@@ -448,7 +455,7 @@ export interface components {
         };
         /**
          * Source
-         * @description One entry of ``sources.yaml`` with defaults applied.
+         * @description One source as written: unset fields inherit the defaults when it is resolved.
          */
         Source: {
             /** Name */
