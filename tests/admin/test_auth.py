@@ -32,6 +32,7 @@ class Provider:
         self.challenge: str | None = None
         self.token_status = 200
         self.claims_override: dict[str, Any] = {}
+        self.userinfo: dict[str, Any] = {"name": "Ada", "email": "ada@example.org"}
         self.sign_with = self.key
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -50,7 +51,7 @@ class Provider:
         if url.endswith("/keys"):
             return httpx.Response(200, json=self.jwks)
         if url.endswith("/userinfo"):
-            return httpx.Response(200, json={"name": "Ada", "email": "ada@example.org"})
+            return httpx.Response(200, json={"sub": "user-1", **self.userinfo})
         if url.endswith("/token"):
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             self.verifier_seen = form["code_verifier"]
@@ -131,3 +132,39 @@ async def test_the_provider_refusing_the_code_is_an_auth_error(oidc: Oidc, provi
     provider.token_status = 400
     with pytest.raises(AuthError, match="refused"):
         await oidc.finish("code", flow["state"], flow)
+
+
+ROLE_CLAIM = "urn:zitadel:iam:org:project:roles"
+
+
+async def test_roles_in_the_id_token_are_read(oidc: Oidc, provider: Provider) -> None:
+    flow = await start(oidc, provider)
+    provider.claims_override = {ROLE_CLAIM: {"events-admin": {"org1": "example.org"}, "viewer": {"org1": "x"}}}
+    who = await oidc.finish("code", flow["state"], flow)
+    assert who.roles == ["events-admin", "viewer"]
+
+
+async def test_roles_fall_back_to_userinfo_and_the_project_specific_claim_counts(
+    oidc: Oidc, provider: Provider
+) -> None:
+    flow = await start(oidc, provider)
+    provider.userinfo = {"urn:zitadel:iam:org:project:123:roles": {"events-admin": {"org1": "x"}}}
+    who = await oidc.finish("code", flow["state"], flow)
+    assert who.roles == ["events-admin"]
+
+
+async def test_no_roles_means_no_roles(oidc: Oidc, provider: Provider) -> None:
+    flow = await start(oidc, provider)
+    provider.userinfo = {}
+    assert (await oidc.finish("code", flow["state"], flow)).roles == []
+
+
+async def test_userinfo_about_someone_else_is_ignored(oidc: Oidc, provider: Provider) -> None:
+    flow = await start(oidc, provider)
+    provider.userinfo = {"sub": "someone-else", ROLE_CLAIM: {"events-admin": {"o": "x"}}}
+    assert (await oidc.finish("code", flow["state"], flow)).roles == []
+
+
+async def test_the_roles_scope_is_requested(oidc: Oidc, provider: Provider) -> None:
+    url, _ = await oidc.start()
+    assert ROLE_CLAIM in parse_qs(urlparse(url).query)["scope"][0].split()

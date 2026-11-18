@@ -84,8 +84,11 @@ def create_admin_app(settings: AdminSettings, pool: Pool | None = None) -> FastA
             raise HTTPException(401, "not signed in")
         return u
 
+    def is_admin(u: dict[str, Any]) -> bool:
+        return settings.admin_role in u.get("roles", [])
+
     def admin(u: Annotated[dict[str, Any], Depends(user)]) -> dict[str, Any]:
-        if u["sub"] not in settings.admin_subjects and not (settings.dev_auth and u["sub"] == DEV_SUB):
+        if not is_admin(u):
             raise HTTPException(403, "this account may not edit the crawler configuration")
         return u
 
@@ -124,16 +127,18 @@ def create_admin_app(settings: AdminSettings, pool: Pool | None = None) -> FastA
         except httpx.HTTPError as exc:
             log.error("OIDC token exchange failed: %s", exc)
             raise HTTPException(502, "the identity provider is not reachable") from exc
-        request.session["user"] = {"sub": who.sub, "name": who.name, "email": who.email}
-        if who.sub not in settings.admin_subjects:
-            log.warning("sign-in by %s (%s) refused: not in EVENTS_ADMIN_SUBJECTS", who.sub, who.email)
+        request.session["user"] = {"sub": who.sub, "name": who.name, "email": who.email, "roles": who.roles}
+        if settings.admin_role not in who.roles:
+            log.warning(
+                "sign-in by %s refused: no role %r (roles received: %s)", who.sub, settings.admin_role, who.roles
+            )
         return RedirectResponse("/")
 
     @app.get("/auth/dev-login")
     async def dev_login(request: Request) -> RedirectResponse:
         if not settings.dev_auth:
             raise HTTPException(404)
-        request.session["user"] = {"sub": DEV_SUB, "name": "Developer", "email": None}
+        request.session["user"] = {"sub": DEV_SUB, "name": "Developer", "email": None, "roles": [settings.admin_role]}
         return RedirectResponse("/")
 
     @app.post("/auth/logout")
@@ -146,8 +151,16 @@ def create_admin_app(settings: AdminSettings, pool: Pool | None = None) -> FastA
         u = request.session.get("user")
         if not u:
             return Me(authenticated=False, oidc=oidc is not None)
-        is_admin = u["sub"] in settings.admin_subjects or (settings.dev_auth and u["sub"] == DEV_SUB)
-        return Me(authenticated=True, admin=is_admin, oidc=oidc is not None, **u)
+        return Me(
+            authenticated=True,
+            admin=is_admin(u),
+            oidc=oidc is not None,
+            required_role=settings.admin_role,
+            sub=u["sub"],
+            name=u.get("name"),
+            email=u.get("email"),
+            roles=u.get("roles", []),
+        )
 
     # --- configuration ---------------------------------------------------------------------------
     @app.get("/api/options")

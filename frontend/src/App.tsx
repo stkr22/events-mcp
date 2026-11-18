@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api } from './api/endpoints';
 import { useMe } from './api/hooks';
@@ -31,19 +30,16 @@ function SignIn({ me }: { me: Me }) {
 }
 
 function NotAuthorised({ me }: { me: Me }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => {
-    void navigator.clipboard.writeText(me.sub ?? '').then(() => setCopied(true), () => setCopied(false));
-  };
   return (
     <Centered>
       <h1 className="text-xl font-semibold">Not authorised</h1>
       <p>{me.name ?? me.email ?? 'This account'} is signed in but is not allowed to edit the crawler configuration.</p>
-      <p className="text-sm text-dim">An operator must add this account id to the allow-list (<code>EVENTS_ADMIN_SUBJECTS</code>), then you can sign in again:</p>
-      <div className="flex items-stretch gap-2">
-        <code className="min-w-0 flex-1 break-all rounded-md border border-line bg-surface px-3 py-2 text-base font-semibold" data-testid="sub">{me.sub}</code>
-        <Button onClick={copy} aria-live="polite">{copied ? 'Copied' : 'Copy'}</Button>
-      </div>
+      <p className="text-sm text-dim">
+        Editing needs the role <code className="font-semibold">{me.required_role}</code> in Zitadel. Ask an administrator to grant it, then sign out and in again.
+      </p>
+      <p className="text-sm text-dim" data-testid="roles">
+        Roles received for this session: {me.roles && me.roles.length > 0 ? me.roles.join(', ') : 'none'}
+      </p>
       <div><SignOut /></div>
     </Centered>
   );

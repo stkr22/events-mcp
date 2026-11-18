@@ -1,9 +1,7 @@
 """Admin app environment."""
 
-from typing import Annotated
-
-from pydantic import SecretStr, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIN_SECRET_CHARS = 32
 
@@ -31,19 +29,15 @@ class AdminSettings(BaseSettings):
     """Signs the session cookie; at least 32 characters outside dev mode."""
     session_max_age_sec: int = 8 * 3600
 
-    admin_subjects: Annotated[list[str], NoDecode] = []
-    """OIDC ``sub`` values allowed to edit. Empty means nobody; a refused user is shown their own id."""
+    admin_role: str = "events-admin"
+    """Zitadel project role that may edit. It is read from the sign-in (scope urn:zitadel:iam:org:project:roles),
+    so access is managed in Zitadel and lasts as long as the session (``session_max_age_sec``)."""
 
     dev_auth: bool = False
     """Sign in as a fixed admin at ``/auth/dev-login``. Refused when ``oidc_issuer`` is set."""
 
     static_dir: str | None = None
     """Built single-page UI to serve at ``/``."""
-
-    @field_validator("admin_subjects", mode="before")
-    @classmethod
-    def _split(cls, v: object) -> object:
-        return [s.strip() for s in v.split(",") if s.strip()] if isinstance(v, str) else v
 
     @property
     def secure_cookies(self) -> bool:

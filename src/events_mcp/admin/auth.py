@@ -17,6 +17,8 @@ import jwt
 
 JWKS_TTL_SEC = 3600
 ALGORITHMS = ["RS256", "RS384", "RS512", "ES256", "PS256"]
+# Asking for this scope makes Zitadel put the user's project roles into the token / userinfo.
+ROLES_SCOPE = "urn:zitadel:iam:org:project:roles"
 
 
 class AuthError(Exception):
@@ -43,6 +45,21 @@ class Identity:
     sub: str
     name: str | None
     email: str | None
+    roles: list[str]
+
+
+def roles_from(claims: dict[str, Any]) -> set[str]:
+    """Collect the role keys from Zitadel's role claims: ``{"role": {"<org id>": "<domain>"}}``.
+
+    Both the generic claim and the project-specific one (``urn:zitadel:iam:org:project:<id>:roles``) count.
+    """
+    roles: set[str] = set()
+    for key, value in claims.items():
+        generic = key == ROLES_SCOPE
+        specific = key.startswith("urn:zitadel:iam:org:project:") and key.endswith(":roles")
+        if (generic or specific) and isinstance(value, dict):
+            roles.update(str(r) for r in value)
+    return roles
 
 
 def _b64(raw: bytes) -> str:
@@ -94,7 +111,7 @@ class Oidc:
                 "response_type": "code",
                 "client_id": self.client_id,
                 "redirect_uri": self.redirect_uri,
-                "scope": "openid profile email",
+                "scope": f"openid profile email {ROLES_SCOPE}",
                 "state": flow.state,
                 "nonce": flow.nonce,
                 "code_challenge": _b64(hashlib.sha256(flow.verifier.encode()).digest()),
@@ -139,13 +156,22 @@ class Oidc:
         if not secrets.compare_digest(str(claims.get("nonce", "")), flow["nonce"]):
             raise AuthError("the ID token does not belong to this sign-in")
         name, email = claims.get("name") or claims.get("preferred_username"), claims.get("email")
-        if (name is None or email is None) and tokens.get("access_token") and meta.get("userinfo_endpoint"):
+        roles = roles_from(claims)
+        # Zitadel only puts roles (and often the profile) into the ID token when the project asserts them there;
+        # the userinfo endpoint is the other place they appear, so ask it when anything is missing.
+        if (
+            (not roles or name is None or email is None)
+            and tokens.get("access_token")
+            and meta.get("userinfo_endpoint")
+        ):
             info = await self._userinfo(meta["userinfo_endpoint"], tokens["access_token"])
-            name, email = name or info.get("name"), email or info.get("email")
-        return Identity(sub=str(claims["sub"]), name=name, email=email)
+            if info.get("sub", claims["sub"]) == claims["sub"]:  # never mix in another account's data
+                name, email = name or info.get("name"), email or info.get("email")
+                roles |= roles_from(info)
+        return Identity(sub=str(claims["sub"]), name=name, email=email, roles=sorted(roles))
 
     async def _userinfo(self, url: str, access_token: str) -> dict[str, Any]:
-        """Best effort: the name and email are only shown in the UI, never used for access."""
+        """Best effort: a failure leaves the user without roles, which means no access."""
         try:
             r = await self._http.get(url, headers={"Authorization": f"Bearer {access_token}"})
             return r.json() if r.status_code == httpx.codes.OK else {}

@@ -164,9 +164,9 @@ crawler accepts. Edits are logged with who made them and the values before and a
 "Check now" / "Re-extract now" set a flag the crawler picks up on its next tick (every 15 minutes); a source with stored
 items cannot be deleted from the UI (disable it: deleting would cascade to its events and to what users were told).
 
-Sign-in is OIDC authorization code with PKCE (a public client, no secret) done by the server; the browser only holds a
+signed session cookie. Being signed in is not enough: the user needs the Zitadel project role `events-admin` (`EVENTS_ADMIN_ADMIN_ROLE`). A
 signed session cookie. Being signed in is not enough: the user's `sub` must be listed in `EVENTS_ADMIN_SUBJECTS`. A
-refused user is shown their own `sub` so an operator can add it. State-changing requests from another origin are refused.
+refused user is told which role is missing and which roles arrived. The roles are read at sign-in (the `urn:zitadel:iam:org:project:roles` scope, from the ID token or userinfo), so a revoked role lasts until the session ends (8 h). State-changing requests from another origin are refused.
 
 | Variable | |
 |---|---|
@@ -174,7 +174,7 @@ refused user is shown their own `sub` so an operator can add it. State-changing 
 | `EVENTS_ADMIN_OIDC_ISSUER`, `EVENTS_ADMIN_OIDC_CLIENT_ID` | e.g. `https://zitadel.example`; the redirect URI `<public url>/auth/callback` must be registered |
 | `EVENTS_ADMIN_PUBLIC_BASE_URL` | where users reach it (https sets `Secure` cookies and the origin check) |
 | `EVENTS_ADMIN_SESSION_SECRET` | at least 32 characters |
-| `EVENTS_ADMIN_ADMIN_SUBJECTS` | comma-separated `sub` allow-list; empty means nobody |
+| `EVENTS_ADMIN_ADMIN_ROLE` | Zitadel project role that may edit (default `events-admin`); grant it in Zitadel |
 | `EVENTS_ADMIN_DEV_AUTH` | `true` signs in as a fixed developer at `/auth/dev-login`; refused together with an issuer |
 
 Local development: `EVENTS_ADMIN_DATABASE_URL=… EVENTS_ADMIN_DEV_AUTH=true events-mcp admin`, and `npm run dev` in
