@@ -79,6 +79,8 @@ async def migrate_with_retry(dsn: str, attempts: int = 60, delay: float = 5.0) -
             applied = await migrate(conn)
             if await ensure_crawler_grants(conn):
                 log.info("granted privileges to role %s", CRAWLER_ROLE)
+            if await ensure_admin_grants(conn):
+                log.info("granted privileges to role %s", ADMIN_ROLE)
             return applied
     raise RuntimeError("database never became reachable")
 
@@ -118,5 +120,25 @@ async def ensure_crawler_grants(conn: AsyncConnection[Any]) -> bool:
         return False
     role = CRAWLER_ROLE
     await conn.execute(f"GRANT SELECT, INSERT, UPDATE ON events, venues, sources, scrape_runs TO {role}")
-    await conn.execute(f"GRANT SELECT ON event_lifecycle TO {role}")
+    await conn.execute(f"GRANT SELECT ON event_lifecycle, crawler_defaults TO {role}")
+    return True
+
+
+ADMIN_ROLE = "events_admin"
+
+
+async def ensure_admin_grants(conn: AsyncConnection[Any]) -> bool:
+    """Grant the admin app's role what it needs, if that role exists. Idempotent.
+
+    It edits the crawler configuration and reads crawl state; it can read events (for counts) but never
+    write them or what users were told about them.
+    """
+    cur = await conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (ADMIN_ROLE,))
+    if await cur.fetchone() is None:
+        return False
+    role = ADMIN_ROLE
+    await conn.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON sources TO {role}")
+    await conn.execute(f"GRANT SELECT, UPDATE ON crawler_defaults TO {role}")
+    await conn.execute(f"GRANT SELECT, INSERT ON source_config_history TO {role}")
+    await conn.execute(f"GRANT SELECT ON events, scrape_runs TO {role}")
     return True

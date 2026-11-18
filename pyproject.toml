@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "events-mcp"
-version = "0.6.1"
+version = "0.7.0"
 description = "MCP server over a Postgres/pgvector store of scraped venue events, exhibitions and channel content."
 authors = [
     { name = "stkr22", email = "stkr22@github.com" }
@@ -49,6 +49,13 @@ crawl = [
     "playwright~=1.55",
     "rapidfuzz~=3.14",
     "boto3~=1.40",
+]
+
+# The admin app (`events-mcp admin`): an API and, in the image, the built single-page UI.
+admin = [
+    "fastapi>=0.115",
+    "pyjwt[crypto]>=2.9",
+    "itsdangerous>=2.2",
 ]
 
 [project.scripts]

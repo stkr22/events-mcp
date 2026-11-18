@@ -27,6 +27,8 @@ from events_mcp.crawl.models import Extraction, Page, RawItem, VenueRef, canonic
 from events_mcp.crawl.pipeline import build_items, stabilize_keys
 from events_mcp.crawl.selector_gen import MIN_ITEMS, generate_selectors
 from events_mcp.crawl.snapshots import SnapshotStore, snapshot_key
+from events_mcp.crawl.store import load_sources as load_db_sources
+from events_mcp.crawl.store import take_run_requests
 from events_mcp.db import connect
 from events_mcp.ingest import (
     Item,
@@ -367,9 +369,24 @@ async def _process(  # noqa: PLR0912, PLR0915
         return outcome["status"]
 
 
+async def _load_config(settings: CrawlerSettings) -> tuple[list[ResolvedSource], bool]:
+    """Return the sources to crawl, and whether they came from the database.
+
+    A ``sources.yaml`` wins when one is given (dry runs, tests); otherwise the admin-edited rows are used.
+    """
+    if settings.sources_file is not None:
+        return load_sources(settings.sources_file), False
+    if settings.database_url is None:
+        raise ValueError("DATABASE_URL is not set and no sources file was given")
+    async with await connect(settings.database_url.get_secret_value()) as conn:
+        sources, _problems = await load_db_sources(conn)  # the store logs each invalid row
+    return sources, True
+
+
 async def reextract(settings: CrawlerSettings, name: str, snapshot: str | None) -> int:
     """Run the LLM tier again on a stored snapshot (prompt iteration without refetching)."""
-    sources = {s.name: s for s in load_sources(settings.sources_file)}
+    loaded, from_db = await _load_config(settings)
+    sources = {s.name: s for s in loaded}
     store = SnapshotStore.from_settings(settings)
     if name not in sources or store is None or settings.database_url is None:
         print("unknown source, or S3/DATABASE_URL not configured", file=sys.stderr)
@@ -383,7 +400,11 @@ async def reextract(settings: CrawlerSettings, name: str, snapshot: str | None) 
     dsn = settings.database_url.get_secret_value()
     source = sources[name]
     async with await connect(dsn) as conn:
-        ids = await sync_sources(conn, list(sources.values()))
+        if from_db:
+            cur = await conn.execute("SELECT name, id FROM sources")
+            ids = {r["name"]: r["id"] for r in await cur.fetchall()}
+        else:
+            ids = await sync_sources(conn, list(sources.values()))
         run_id = await start_run(conn, ids[name])
         outcome: dict[str, Any] = {"status": "failed", "extractor": "llm", "snapshot_key": key}
         try:
@@ -428,9 +449,9 @@ async def scrape(
 ) -> int:
     """Entry point of ``events-mcp scrape``. Returns the process exit code."""
     try:
-        sources = load_sources(settings.sources_file)
+        sources, from_db = await _load_config(settings)
     except (OSError, ValueError) as exc:
-        print(f"invalid sources file {settings.sources_file}: {exc}", file=sys.stderr)
+        print(f"cannot load the sources ({settings.sources_file or 'database'}): {exc}", file=sys.stderr)
         return 2
     selected = [s for s in sources if not names or s.name in names]
     if names and (missing := set(names) - {s.name for s in sources}):
@@ -455,7 +476,7 @@ async def scrape(
                 except (FetchError, RobotsBlockedError, NoExtractorError, NoProviderError, BadOutputError) as exc:
                     log.error("%s: %s", s.name, exc)
             return 0
-        return await _scrape_live(svc, sources, selected, force=force, extractor=extractor)
+        return await _scrape_live(svc, sources, selected, force=force, extractor=extractor, from_db=from_db)
     finally:
         await svc.fetcher.aclose()
         if svc.geocoder:
@@ -463,21 +484,35 @@ async def scrape(
 
 
 async def _scrape_live(
-    svc: Services, sources: list[ResolvedSource], selected: list[ResolvedSource], *, force: bool, extractor: str | None
+    svc: Services,
+    sources: list[ResolvedSource],
+    selected: list[ResolvedSource],
+    *,
+    force: bool,
+    extractor: str | None,
+    from_db: bool,
 ) -> int:
     settings = svc.settings
     if settings.database_url is None:
         log.error("DATABASE_URL is not set")
         return 2
     dsn = settings.database_url.get_secret_value()
+    full: set[str] = set()
     try:
         async with await connect(dsn) as conn:
-            ids = await sync_sources(conn, sources)
+            if from_db:
+                cur = await conn.execute("SELECT name, id FROM sources")
+                ids = {r["name"]: r["id"] for r in await cur.fetchall()}
+                requests = await take_run_requests(conn)
+                full = {n for n, mode in requests.items() if mode == "full"}
+            else:
+                ids = await sync_sources(conn, sources)
+                requests = {}
             await close_stuck_runs(conn)
             now = datetime.now(UTC)
             due = []
             for s in selected:
-                if force or is_due(s.interval_delta, await load_state(conn, ids[s.name]), now):
+                if force or s.name in requests or is_due(s.interval_delta, await load_state(conn, ids[s.name]), now):
                     due.append(s)
     except Exception:
         log.exception("database unavailable or schema not migrated")
@@ -498,7 +533,7 @@ async def _scrape_live(
             limit = s.timeout_sec or settings.source_timeout_sec
             try:
                 async with asyncio.timeout(limit):
-                    return await _process(dsn, s, ids[s.name], svc, force=force, extractor=extractor)
+                    return await _process(dsn, s, ids[s.name], svc, force=force or s.name in full, extractor=extractor)
             except TimeoutError:
                 async with await connect(dsn) as conn:
                     await conn.execute(

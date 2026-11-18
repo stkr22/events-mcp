@@ -21,6 +21,18 @@ from events_mcp.server import create_app, make_embedder
 log = logging.getLogger("events_mcp")
 
 
+def _admin() -> int:
+    try:
+        from events_mcp.admin.app import create_admin_app  # noqa: PLC0415 - needs the [admin] extra
+        from events_mcp.admin.settings import AdminSettings  # noqa: PLC0415
+    except ImportError:
+        print("the admin app needs the [admin] extra: pip install events-mcp[admin]", file=sys.stderr)
+        return 2
+    settings = AdminSettings()
+    uvicorn.run(create_admin_app(settings), host=settings.host, port=settings.port, log_config=None)
+    return 0
+
+
 def _serve(settings: Settings) -> None:
     app, state = create_app(settings, make_embedder(settings))
     start_http_server(settings.metrics_port, registry=state.metrics.registry)
@@ -92,6 +104,15 @@ async def _import(settings: Settings, args: argparse.Namespace) -> None:
     print(f"{len(items)} items, {inserted} new, {len(items) - inserted} updated")
 
 
+async def _import_sources(settings: Settings, args: argparse.Namespace) -> None:
+    """Load a sources.yaml into the database once (defaults and sources)."""
+    from events_mcp.crawl.store import import_file  # noqa: PLC0415 - needs PyYAML, in the crawler image only
+
+    async with await connect(settings.database_url.get_secret_value()) as conn:
+        n = await import_file(conn, args.file, actor="import")
+    print(f"imported {n} sources")
+
+
 async def _backfill(settings: Settings, args: argparse.Namespace) -> None:
     embedder = make_embedder(settings)
     if embedder is None:
@@ -128,6 +149,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the MCP server (default)")
     sub.add_parser("migrate", help="apply pending migrations and exit")
+    sub.add_parser("admin", help="run the admin app (sources and settings editor)")
     imp = sub.add_parser("import", help="upsert a JSON-lines file of items for one source")
     imp.add_argument("file")
     imp.add_argument("--source-name", required=True)
@@ -135,8 +157,10 @@ def main(argv: list[str] | None = None) -> None:
     imp.add_argument("--source-url", required=True)
     imp.add_argument("--city")
     imp.add_argument("--no-embed", action="store_true", help="skip the embedding endpoint")
-    sc = sub.add_parser("scrape", help="fetch the sources in sources.yaml and upsert their items")
-    sc.add_argument("--config", type=Path, help="sources.yaml (default: $SOURCES_FILE)")
+    isrc = sub.add_parser("import-sources", help="load a sources.yaml into the database (replaces same-named sources)")
+    isrc.add_argument("file", type=Path)
+    sc = sub.add_parser("scrape", help="fetch the configured sources and upsert their items")
+    sc.add_argument("--config", type=Path, help="read this sources.yaml instead of the database")
     sc.add_argument("--source", action="append", dest="sources", help="only this source (repeatable)")
     sc.add_argument("--force", action="store_true", help="ignore the due check and hash gating")
     sc.add_argument("--dry-run", action="store_true", help="print JSONL to stdout; write nothing")
@@ -149,6 +173,8 @@ def main(argv: list[str] | None = None) -> None:
     bf.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
 
+    if args.command == "admin":
+        sys.exit(_admin())
     if args.command in {"scrape", "reextract"}:
         sys.exit(_scrape(args))
     settings = get_settings()
@@ -157,6 +183,8 @@ def main(argv: list[str] | None = None) -> None:
             _serve(settings)
         case "migrate":
             asyncio.run(_migrate(settings))
+        case "import-sources":
+            asyncio.run(_import_sources(settings, args))
         case "import":
             asyncio.run(_import(settings, args))
         case "backfill-embeddings":

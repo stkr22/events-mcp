@@ -1,6 +1,6 @@
 name: Container Push
 
-# A pushed v* tag publishes ghcr.io/stkr22/events-mcp:<version> and ghcr.io/stkr22/events-mcp-crawler:<version>.
+# A pushed v* tag publishes ghcr.io/stkr22/events-mcp, events-mcp-crawler and events-mcp-admin at <version>.
 on:
   push:
     tags:
@@ -58,5 +58,20 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}-crawler:latest
             ghcr.io/${{ github.repository }}-crawler:${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and Push admin
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6
+        with:
+          context: .
+          file: Containerfile.admin
+          platforms: linux/amd64,linux/arm64
+          push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: |
+            ghcr.io/${{ github.repository }}-admin:latest
+            ghcr.io/${{ github.repository }}-admin:${{ env.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
