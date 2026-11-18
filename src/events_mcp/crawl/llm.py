@@ -191,7 +191,8 @@ def build_chain(settings: CrawlerSettings) -> list[ChatClient]:
 
 SYSTEM = (
     "You extract listings (events, exhibitions, videos, sales) from the text of one web page. "
-    "Rules: only items that are explicitly on the page; never invent. Omit any field you are not sure of. "
+    "Rules: extract EVERY listing on the page, do not skip or merge any, but only items that are explicitly "
+    "on the page; never invent. Omit any field you are not sure of. "
     "`title` is copied from the page. `raw_text` is the verbatim excerpt of the page about that item. "
     "Dates are ISO-8601 in local time (YYYY-MM-DD or YYYY-MM-DDTHH:MM); a date without a year takes the "
     "nearest plausible year given today's date. `kind` is one of: event, exhibition, video, sale, other. "
