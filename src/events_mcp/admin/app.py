@@ -1,7 +1,7 @@
 """The admin FastAPI app: sign-in, the configuration API, and the built UI."""
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, get_args
@@ -50,7 +50,7 @@ def create_admin_app(settings: AdminSettings, pool: Pool | None = None) -> FastA
     allowed_origin = f"{origin.scheme}://{origin.netloc}"
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         app.state.pool = pool or make_pool(settings.database_url.get_secret_value(), max_size=4)
         if own_pool:
             await app.state.pool.open(wait=True)
