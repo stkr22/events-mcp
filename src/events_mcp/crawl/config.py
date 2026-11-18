@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 from urllib.parse import urlparse
 
-import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -78,7 +77,7 @@ class Defaults(_Strict):
 
 
 class Source(_Strict):
-    """One entry of ``sources.yaml`` with defaults applied."""
+    """One source as written: unset fields inherit the defaults when it is resolved."""
 
     name: str
     type: SourceType
@@ -195,21 +194,24 @@ class SourcesFile(_Strict):
 
     def resolve(self) -> list[ResolvedSource]:
         """Apply ``defaults`` to every source."""
-        d = self.defaults
-        out = []
-        for s in self.sources:
-            data = s.model_dump()
-            for key in ("city", "timezone", "interval", "render", "extractor", "politeness"):
-                if data[key] is None:
-                    data[key] = getattr(d, key)
-            if s.type == "youtube":
-                data["extractor"] = "youtube" if data["extractor"] == "auto" else data["extractor"]
-            out.append(ResolvedSource.model_validate(data))
-        return out
+        return [resolve_source(s, self.defaults) for s in self.sources]
+
+
+def resolve_source(source: Source, defaults: Defaults) -> ResolvedSource:
+    """Fill every unset field of one source from ``defaults``."""
+    data = source.model_dump()
+    for key in ("city", "timezone", "interval", "render", "extractor", "politeness"):
+        if data[key] is None:
+            data[key] = getattr(defaults, key)
+    if source.type == "youtube":
+        data["extractor"] = "youtube" if data["extractor"] == "auto" else data["extractor"]
+    return ResolvedSource.model_validate(data)
 
 
 def load_sources(path: Path) -> list[ResolvedSource]:
     """Read and validate ``sources.yaml``; raises ``ValueError`` with every problem listed."""
+    import yaml  # noqa: PLC0415 - only the crawler image carries PyYAML
+
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return SourcesFile.model_validate(raw).resolve()
 
@@ -222,7 +224,8 @@ class CrawlerSettings(BaseSettings):
     database_url: SecretStr | None = Field(
         default=None, validation_alias=AliasChoices("DATABASE_URL", "EVENTS_DATABASE_URL")
     )
-    sources_file: Path = Path("/config/sources.yaml")
+    sources_file: Path | None = None
+    """A sources.yaml to read instead of the database (dry runs, tests, a first import)."""
     user_agent: str = "events-mcp-crawler (+https://github.com/stkr22/events-mcp)"
     geocoder_url: str = "https://nominatim.openstreetmap.org/search"
     geocode: bool = True

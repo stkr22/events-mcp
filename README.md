@@ -79,6 +79,8 @@ events-mcp migrate
 events-mcp import items.jsonl --source-name "Kunsthalle" --source-type museum \
     --source-url https://www.hamburger-kunsthalle.de --city Hamburg
 events-mcp backfill-embeddings
+events-mcp import-sources sources.yaml   # one-off: load defaults and sources into the database
+events-mcp admin                     # the admin app (needs the [admin] extra or the -admin image)
 events-mcp scrape [--config sources.yaml] [--source NAME ...] [--force] [--dry-run] [--extractor TIER]
 events-mcp reextract --source NAME [--snapshot KEY]
 ```
@@ -91,10 +93,13 @@ except `last_seen`.
 
 ## Crawler
 
-`events-mcp scrape` reads `sources.yaml` (`SOURCES_FILE`), upserts it into `sources` (sources dropped from the file are
-disabled, never deleted), and processes the due ones. Install with `pip install events-mcp[crawl]` or use the
-`ghcr.io/stkr22/events-mcp-crawler` image. A source is due when its `interval` has passed since the last success, or
-after a failed run on a 15 min / 30 min / 1 h backoff.
+`events-mcp scrape` reads the sources from the database (`sources.config` and `crawler_defaults`, edited in the admin app,
+see below) and processes the due ones. A `--config sources.yaml` reads that file instead and, for a live run, syncs it
+into the database as before (sources dropped from the file are disabled, never deleted); `events-mcp import-sources FILE`
+loads such a file once. Install with `pip install events-mcp[crawl]` or use the
+`ghcr.io/stkr22/events-mcp-crawler` image. A source is due when its `interval` has passed since the last success, after a
+failed run on a 15 min / 30 min / 1 h backoff, or when the admin app asked for a run. A source whose stored config no
+longer validates is logged and skipped; the others still run.
 
 Each page is fetched politely (per-host rate limit, robots.txt; a robots block is the run status `blocked_robots`),
 then run through the cheapest tier that yields items: iCal, RSS/Atom, YouTube uploads feed, schema.org Event
@@ -146,9 +151,34 @@ init scripts); Chrome's launch flags are never changed. Robots rules and pacing 
 With `S3_*` set, the cleaned text is stored as `snapshots/<source>/<date>/<sha256>.md.zst` whenever the hash changes and
 pruned after 90 days; `reextract` reruns the LLM tier on the newest (or a given) snapshot.
 
-Environment: `DATABASE_URL` (or `EVENTS_DATABASE_URL`), `SOURCES_FILE`, `USER_AGENT`, `GEOCODER_URL`.
+Environment: `DATABASE_URL` (or `EVENTS_DATABASE_URL`), `SOURCES_FILE` (optional, reads a file instead of the database), `USER_AGENT`, `GEOCODER_URL`.
 The database role `events_crawler`, if it exists, is granted exactly the privileges it needs on every startup
 of the server (`migrate`).
+
+## Admin app
+
+`events-mcp admin` (image `ghcr.io/stkr22/events-mcp-admin`) serves a React UI and a JSON API to edit the crawler's
+sources and defaults and to see how each source is doing (last run, error, items, change history). Everything the
+`sources.yaml` schema offers is editable; the API validates with the crawler's own models, so a saved source is one the
+crawler accepts. Edits are logged with who made them and the values before and after (`source_config_history`).
+"Check now" / "Re-extract now" set a flag the crawler picks up on its next tick (every 15 minutes); a source with stored
+items cannot be deleted from the UI (disable it: deleting would cascade to its events and to what users were told).
+
+Sign-in is OIDC authorization code with PKCE (a public client, no secret) done by the server; the browser only holds a
+signed session cookie. Being signed in is not enough: the user's `sub` must be listed in `EVENTS_ADMIN_SUBJECTS`. A
+refused user is shown their own `sub` so an operator can add it. State-changing requests from another origin are refused.
+
+| Variable | |
+|---|---|
+| `EVENTS_ADMIN_DATABASE_URL` | the `events_admin` role: may edit the two config tables and read crawl state and events; nothing else |
+| `EVENTS_ADMIN_OIDC_ISSUER`, `EVENTS_ADMIN_OIDC_CLIENT_ID` | e.g. `https://zitadel.example`; the redirect URI `<public url>/auth/callback` must be registered |
+| `EVENTS_ADMIN_PUBLIC_BASE_URL` | where users reach it (https sets `Secure` cookies and the origin check) |
+| `EVENTS_ADMIN_SESSION_SECRET` | at least 32 characters |
+| `EVENTS_ADMIN_ADMIN_SUBJECTS` | comma-separated `sub` allow-list; empty means nobody |
+| `EVENTS_ADMIN_DEV_AUTH` | `true` signs in as a fixed developer at `/auth/dev-login`; refused together with an issuer |
+
+Local development: `EVENTS_ADMIN_DATABASE_URL=… EVENTS_ADMIN_DEV_AUTH=true events-mcp admin`, and `npm run dev` in
+`frontend/` (the Vite server proxies `/api` and `/auth` to port 8080). The API documents itself at `/api/docs`.
 
 ## Metrics
 

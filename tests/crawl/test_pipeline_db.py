@@ -8,9 +8,10 @@ from psycopg import AsyncConnection
 from psycopg.errors import CheckViolation
 from psycopg.rows import DictRow
 
-from events_mcp.crawl.config import CrawlerSettings
+from events_mcp.crawl import store
+from events_mcp.crawl.config import CrawlerSettings, Source
 from events_mcp.crawl.fetch import Fetcher
-from events_mcp.crawl.runner import Services, _process, close_stuck_runs, sync_sources
+from events_mcp.crawl.runner import Services, _process, _scrape_live, close_stuck_runs, sync_sources
 from events_mcp.db import ensure_crawler_grants
 from events_mcp.ingest import touch_source
 from events_mcp.metrics import Metrics
@@ -219,3 +220,46 @@ async def test_metrics_cover_new_gauges(conn: AsyncConnection[DictRow], web: Web
     assert m.last_status.labels(source="club", status="success")._value.get() == 1
     assert m.source_items.labels(source="club", lifecycle="upcoming")._value.get() > 0
     assert m.source_items.labels(source="club", lifecycle="ended")._value.get() == 0
+
+
+async def test_database_mode_runs_what_is_due_and_honours_run_requests(
+    conn: AsyncConnection[DictRow], web: Web, settings: CrawlerSettings
+) -> None:
+    authored = Source(
+        name="club", type="venue", url="https://club.example/events.ics", extractor="ical", city="Hamburg"
+    )
+    await store.save_source(conn, authored, actor="t")
+    sources, _ = await store.load_sources(conn)
+    svc = Services(settings, Fetcher("test-agent", client=web.client()), None, None, None, [])
+
+    async def tick() -> int:
+        return await _scrape_live(svc, sources, sources, force=False, extractor=None, from_db=True)
+
+    assert await tick() == 0 and len(await runs(conn)) == 1  # never run: due
+    assert await tick() == 0 and len(await runs(conn)) == 1  # not due again yet
+    await store.request_run(conn, "club", "due")
+    assert await tick() == 0 and len(await runs(conn)) == 2  # the admin asked
+    row = await (await conn.execute("SELECT run_request, config FROM sources")).fetchone()
+    assert row is not None and row["run_request"] is None  # taken once
+    assert row["config"] == authored.model_dump(mode="json", exclude_none=True)  # the crawler never rewrites it
+    await svc.fetcher.aclose()
+
+
+async def test_a_full_request_ignores_the_unchanged_page_gate(
+    conn: AsyncConnection[DictRow], web: Web, settings: CrawlerSettings
+) -> None:
+    authored = Source(
+        name="club", type="venue", url="https://club.example/events.ics", extractor="ical", city="Hamburg"
+    )
+    await store.save_source(conn, authored, actor="t")
+    sources, _ = await store.load_sources(conn)
+    svc = Services(settings, Fetcher("test-agent", client=web.client()), None, None, None, [])
+    await _scrape_live(svc, sources, sources, force=False, extractor=None, from_db=True)
+    await store.request_run(conn, "club", "due")
+    await _scrape_live(svc, sources, sources, force=False, extractor=None, from_db=True)
+    await store.request_run(conn, "club", "full")
+    await _scrape_live(svc, sources, sources, force=False, extractor=None, from_db=True)
+    _first, due, full = await runs(conn)
+    assert (due["items_touched"], due["items_new"]) == (5, 0)  # unchanged page: only touched
+    assert full["items_touched"] == 0 and full["items_updated"] == 5  # re-processed in full
+    await svc.fetcher.aclose()
