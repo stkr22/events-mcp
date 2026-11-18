@@ -60,6 +60,9 @@ def test_tools_listed(client: TestClient) -> None:
         "upcoming",
         "ending_soon",
         "registration_deadlines",
+        "track_event",
+        "my_events",
+        "untrack_event",
         "get_event",
         "list_sources",
     }
@@ -137,3 +140,11 @@ def test_the_instructions_tell_an_agent_that_films_are_events() -> None:
     for word in ("film", "cinema", "concert", "theatre"):
         assert word in INSTRUCTIONS.lower()
     assert "films" in KIND_HELP
+
+
+def test_the_instructions_keep_tracking_a_working_state() -> None:
+    from events_mcp.server import INSTRUCTIONS  # noqa: PLC0415
+
+    # The tracking tools must not read as a place to keep preferences or notes.
+    for cue in ("track_event", "not a knowledge store", "task manager", "60 days"):
+        assert cue in INSTRUCTIONS
