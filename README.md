@@ -21,6 +21,9 @@ upsert SQL (`events_mcp.ingest`). This server owns the schema: its migrations ru
 | `registration_deadlines(city, days, which, kind)` | Items whose stated registration / ticket-sale window closes (`which="closing"`, default) or opens (`"opening"`) within `days`, soonest first. Ended and cancelled items are left out |
 | `get_event(event_id)` | One item, with page text, venue and source |
 | `list_sources()` | Sources with item counts and their last successful scrape |
+| `track_event(event_id, status, task_ref)` | Record that the user was told about an event (`raised`), turned it down (`dismissed`) or that it is now in their task manager (`planned`, `task_ref` = the task id). Working state, not a knowledge store |
+| `my_events(status, changed)` | Tracked events with current data; `changes` shows what differs from what the user was told |
+| `untrack_event(event_id)` | Forget one event |
 
 Bare dates (`2026-11-21`) are local days in `EVENTS_TIMEZONE`. A `date_to` bound includes that whole day.
 
@@ -122,6 +125,17 @@ take `registration=<state>`. The LLM tier reads the fields from the page, the JS
 (`validFrom`, `validThrough`, `url`); iCal, RSS, YouTube and the stored-selector tier do not carry them. A later run
 that does not state them keeps the stored values; a new date pair replaces the old pair as a whole. Registration data
 is usually on an event's own page, not on the listing the crawler reads, so expect it where the listing shows it.
+
+**Tracking.** `event_user_state` holds, per event, what the agent told the user: `raised`, `dismissed` or `planned` (with an opaque
+`task_ref` into the task manager), plus a snapshot of the title, start, registration window and status at that moment.
+Every listing shows `tracked_status`; `hide_handled=true` leaves dismissed and planned events out (off by default, so a
+search for a title still finds it). `my_events(changed=true)` compares the snapshot with the crawler's current data, which is
+how a moved date or a newly found registration window reaches the agent. A postponed event that has no stable id or
+URL becomes a new row at the source; the old one goes `is_stale`. It is deliberately **not** a place for notes, reminders,
+calendar links or preferences: planning belongs in the user's task manager (Vikunja), long-term preferences elsewhere.
+Rows for events that ended over 60 days ago are hidden and purged on the next write. This is the only per-user data in the
+database and the one thing a re-crawl cannot rebuild, so it is covered by the database backup, not by the crawler.
+The crawler role has no grant on it.
 
 `render: browser` / `browser_stealth` fetch through a shared Chrome over CDP (`CDP_URL`, an IP: Chrome rejects
 hostnames), one fresh context per page, at most one at a time. Stealth is per context only (UA, locale, timezone,

@@ -12,6 +12,9 @@ Kind = Literal["event", "exhibition", "video", "sale", "other"]
 KINDS: tuple[str, ...] = ("event", "exhibition", "video", "sale", "other")
 RegistrationState = Literal["not_yet_open", "open", "closed"]
 REGISTRATION_STATES: tuple[str, ...] = ("not_yet_open", "open", "closed")
+TrackStatus = Literal["raised", "dismissed", "planned"]
+TRACK_STATUSES: tuple[str, ...] = ("raised", "dismissed", "planned")
+MAX_TASK_REF = 200
 
 # Reciprocal-rank-fusion constant; 60 is the usual choice and is insensitive in practice.
 RRF_K = 60
@@ -22,13 +25,28 @@ _LIST_COLUMNS = """
     l.id, l.title, l.kind, l.starts_at, l.ends_at, l.city, l.url, l.status, l.lifecycle, l.is_stale,
     l.registration_state, l.registration_opens_at, l.registration_closes_at, l.tickets_url,
     l.first_seen, l.last_seen, left(l.summary, %(summary_chars)s::int) AS summary,
-    v.name AS venue, v.address AS venue_address, s.name AS source
+    v.name AS venue, v.address AS venue_address, s.name AS source, u.status AS tracked_status
 """
+# One user for now: the owner column exists so a second person needs no migration, but no tool takes it.
 _LIST_FROM = """
     FROM event_lifecycle l
     JOIN sources s ON s.id = l.source_id
     LEFT JOIN venues v ON v.id = l.venue_id
+    LEFT JOIN event_user_state u ON u.event_id = l.id AND u.owner = 'default'
 """
+# Tracked events whose data differs from what the user was told.
+_CHANGED = """(u.snapshot_starts_at IS DISTINCT FROM l.starts_at
+    OR u.snapshot_registration_opens_at IS DISTINCT FROM l.registration_opens_at
+    OR u.snapshot_registration_closes_at IS DISTINCT FROM l.registration_closes_at
+    OR u.snapshot_event_status IS DISTINCT FROM l.status
+    OR u.snapshot_title IS DISTINCT FROM l.title)"""
+_CHANGE_FIELDS = (
+    ("title", "snapshot_title"),
+    ("starts_at", "snapshot_starts_at"),
+    ("registration_opens_at", "snapshot_registration_opens_at"),
+    ("registration_closes_at", "snapshot_registration_closes_at"),
+    ("status", "snapshot_event_status"),
+)
 
 
 def parse_when(value: str | None, tz: ZoneInfo, *, end_of_day: bool = False) -> datetime | None:
@@ -58,6 +76,8 @@ class Filters:
     """Leave out kind=sale unless a kind filter names it: "what is on" is about events, not discounts."""
     registration: str | None = None
     """not_yet_open, open or closed; items that say nothing about registration never match."""
+    hide_handled: bool = False
+    """Leave out events the user dismissed or that are already planned."""
     date_from: datetime | None = None
     date_to: datetime | None = None
     source: str | None = None
@@ -90,6 +110,8 @@ class Filters:
                 raise ValueError(f"registration must be one of {', '.join(REGISTRATION_STATES)}")
             clauses.append("l.registration_state = %(registration)s")
             p["registration"] = self.registration
+        if self.hide_handled:
+            clauses.append("(u.status IS NULL OR u.status = 'raised')")
         if self.city:
             clauses.append("lower(l.city) = lower(%(city)s)")
             p["city"] = self.city.strip()
@@ -269,11 +291,13 @@ async def get_event(pool: Pool, event_id: int, tz: ZoneInfo) -> dict[str, Any] |
         SELECT l.id, l.title, l.kind, l.starts_at, l.ends_at, l.city, l.url, l.status, l.lifecycle,
                l.is_stale, l.first_seen, l.last_seen, l.summary, l.raw_text, l.embedding_model,
                l.registration_state, l.registration_opens_at, l.registration_closes_at, l.tickets_url,
+               u.status AS tracked_status, u.task_ref,
                v.name AS venue, v.address AS venue_address, v.city AS venue_city, v.lat AS venue_lat,
                v.lon AS venue_lon, s.name AS source, s.type AS source_type, s.url AS source_url
         FROM event_lifecycle l
         JOIN sources s ON s.id = l.source_id
         LEFT JOIN venues v ON v.id = l.venue_id
+        LEFT JOIN event_user_state u ON u.event_id = l.id AND u.owner = 'default'
         WHERE l.id = %(id)s
     """
     rows = await _fetch(pool, sql, {"id": event_id})
@@ -316,3 +340,92 @@ async def registration_deadlines(
     """
     params = {**filters.params, "summary_chars": SUMMARY_CHARS, "days": days, "limit": limit}
     return [_row(r, tz) for r in await _fetch(pool, sql, params)]
+
+
+async def track_event(pool: Pool, event_id: int, status: str, task_ref: str | None = None) -> dict[str, Any]:
+    """Record what the user was told (raised), declined (dismissed) or planned, with a snapshot of the event.
+
+    Calling it again replaces the status and refreshes the snapshot, which clears "changed". Rows for events
+    that ended more than 60 days ago are purged on the way.
+    """
+    if status not in TRACK_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(TRACK_STATUSES)}")
+    ref = task_ref.strip() if task_ref else None
+    if ref and status != "planned":
+        raise ValueError("task_ref only goes with status=planned")
+    if ref and len(ref) > MAX_TASK_REF:
+        raise ValueError(f"task_ref is a pointer, at most {MAX_TASK_REF} characters; notes belong in the task")
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """DELETE FROM event_user_state u USING event_lifecycle l
+               WHERE l.id = u.event_id AND l.window_end < now() - interval '60 days'"""
+        )
+        cur = await conn.execute(
+            """
+            INSERT INTO event_user_state AS u (
+                event_id, owner, status, task_ref, snapshot_title, snapshot_starts_at,
+                snapshot_registration_opens_at, snapshot_registration_closes_at, snapshot_event_status)
+            SELECT e.id, 'default', %(status)s, %(ref)s, e.title, e.starts_at,
+                   e.registration_opens_at, e.registration_closes_at, e.status
+            FROM events e WHERE e.id = %(id)s
+            ON CONFLICT (event_id, owner) DO UPDATE SET
+                status = EXCLUDED.status, task_ref = EXCLUDED.task_ref,
+                snapshot_title = EXCLUDED.snapshot_title, snapshot_starts_at = EXCLUDED.snapshot_starts_at,
+                snapshot_registration_opens_at = EXCLUDED.snapshot_registration_opens_at,
+                snapshot_registration_closes_at = EXCLUDED.snapshot_registration_closes_at,
+                snapshot_event_status = EXCLUDED.snapshot_event_status,
+                updated_at = now()
+            RETURNING u.event_id, u.status, u.task_ref
+            """,
+            {"id": event_id, "status": status, "ref": ref},
+        )
+        row = await cur.fetchone()
+    if row is None:
+        raise ValueError(f"no item with id {event_id}")
+    return {k: v for k, v in row.items() if v is not None}
+
+
+async def untrack_event(pool: Pool, event_id: int) -> bool:
+    """Forget an event entirely. Returns whether there was anything to forget."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "DELETE FROM event_user_state WHERE event_id = %(id)s AND owner = 'default'", {"id": event_id}
+        )
+        return cur.rowcount > 0
+
+
+def _fmt(value: Any, tz: ZoneInfo) -> Any:
+    return value.astimezone(tz).isoformat() if isinstance(value, datetime) else value
+
+
+async def my_events(
+    pool: Pool, status: str | None, changed: bool, tz: ZoneInfo, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Tracked events with their current data; ``changes`` lists what differs from what the user was told."""
+    if status is not None and status not in TRACK_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(TRACK_STATUSES)}")
+    sql = f"""
+        SELECT {_LIST_COLUMNS}, u.task_ref, u.updated_at AS tracked_at, u.snapshot_title,
+               u.snapshot_starts_at, u.snapshot_registration_opens_at, u.snapshot_registration_closes_at,
+               u.snapshot_event_status
+        {_LIST_FROM}
+        WHERE u.event_id IS NOT NULL
+          AND (%(status)s::text IS NULL OR u.status = %(status)s)
+          AND (NOT %(changed)s OR {_CHANGED})
+          AND (l.window_end IS NULL OR l.window_end >= now() - interval '60 days')
+        ORDER BY l.window_start NULLS LAST, l.id
+        LIMIT %(limit)s
+    """
+    params = {"summary_chars": SUMMARY_CHARS, "status": status, "changed": changed, "limit": limit}
+    out = []
+    for r in await _fetch(pool, sql, params):
+        changes = {
+            now_key: {"told": _fmt(r[snap_key], tz), "now": _fmt(r[now_key], tz)}
+            for now_key, snap_key in _CHANGE_FIELDS
+            if r[now_key] != r[snap_key]
+        }
+        item = _row({k: v for k, v in r.items() if not k.startswith("snapshot_")}, tz)
+        if changes:
+            item["changes"] = changes
+        out.append(item)
+    return out
