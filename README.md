@@ -29,7 +29,9 @@ Bare dates (`2026-11-21`) are local days in `EVENTS_TIMEZONE`. A `date_to` bound
 
 ## Data model
 
-- `sources`: venue sites, museums, channels and feeds (`type` is `venue`, `museum`, `youtube` or `feed`)
+- `sources`: venue sites, museums, channels and feeds (`type` is `venue`, `museum`, `youtube` or `feed`). A `youtube`
+  source takes the channel's `channel_id` (`UC...`) and reads its uploads playlist (`UULF...`), which has the same videos
+  as the channel feed without the Shorts, each with its full description
 - `venues`: name, city, address, lat/lon (geocoded at scrape time; `cube` + `earthdistance` are loaded
   for distance queries)
 - `events`: one row per listing, unique on `(source_id, dedupe_key)`. Upserts keep `first_seen`
@@ -95,7 +97,7 @@ disabled, never deleted), and processes the due ones. Install with `pip install 
 after a failed run on a 15 min / 30 min / 1 h backoff.
 
 Each page is fetched politely (per-host rate limit, robots.txt; a robots block is the run status `blocked_robots`),
-then run through the cheapest tier that yields items: iCal, RSS/Atom, YouTube channel feed, schema.org Event
+then run through the cheapest tier that yields items: iCal, RSS/Atom, YouTube uploads feed, schema.org Event
 (JSON-LD/microdata). The result is hashed; an unchanged hash only bumps `last_seen` (`touch_source`) and costs
 no extraction. `--dry-run` prints the import records as JSONL and writes nothing: use it to onboard a source.
 

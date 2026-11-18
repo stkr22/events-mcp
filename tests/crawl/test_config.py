@@ -19,7 +19,7 @@ def test_interval_parsing() -> None:
 
 def test_defaults_applied_and_youtube_resolves_to_feed() -> None:
     s = make_source(type="youtube", url=None, channel_id="UC123")
-    assert s.primary_url == "https://www.youtube.com/feeds/videos.xml?channel_id=UC123"
+    assert s.primary_url == "https://www.youtube.com/feeds/videos.xml?playlist_id=UULF123"  # uploads, no Shorts
     assert (s.city, s.interval, s.render, s.extractor) == ("Hamburg", "24h", "http", "youtube")
 
 
@@ -35,6 +35,7 @@ def test_hosts_default_to_url_hosts_and_egress_overrides() -> None:
         {"name": "Bad Name"},
         {"channel_id": "UC1"},
         {"type": "youtube", "url": None},
+        {"type": "youtube", "url": None, "channel_id": "PLabc"},
         {"type": "youtube", "channel_id": "UC1"},
         {"url": "ftp://x.example"},
         {"surprise": 1},
