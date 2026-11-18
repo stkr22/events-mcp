@@ -17,7 +17,9 @@ KindName = Literal["event", "exhibition", "video", "sale", "other"]
 
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _INTERVAL = re.compile(r"^(\d+)\s*([mhd])$")
-YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+# The channel feed mixes Shorts into its 15 entries (14 of 15 on some channels); the "UULF" playlist is the
+# same uploads without Shorts. Its id is the channel id with the leading "UC" replaced by "UULF".
+YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?playlist_id=UULF{channel_tail}"
 
 
 def parse_interval(value: str) -> timedelta:
@@ -129,6 +131,8 @@ class Source(_Strict):
             raise ValueError("channel_id is required for, and only valid on, type: youtube")
         if self.type == "youtube" and self.url:
             raise ValueError("a youtube source takes channel_id, not url")
+        if self.channel_id is not None and not self.channel_id.startswith("UC"):
+            raise ValueError("channel_id is the channel's UC... id")
         if self.type != "youtube" and not self.url:
             raise ValueError("url is required")
         return self
@@ -153,7 +157,7 @@ class ResolvedSource(Source):
         """The URL stored in ``sources.url`` (unique per source)."""
         if self.type == "youtube":
             assert self.channel_id is not None  # noqa: S101 - validated
-            return YOUTUBE_FEED.format(channel_id=self.channel_id)
+            return YOUTUBE_FEED.format(channel_tail=self.channel_id[2:])
         assert self.url is not None  # noqa: S101 - validated
         return self.url
 
