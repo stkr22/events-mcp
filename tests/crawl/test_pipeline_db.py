@@ -219,7 +219,9 @@ async def test_metrics_cover_new_gauges(conn: AsyncConnection[DictRow], web: Web
     assert m.interval.labels(source="club")._value.get() == 86400
     assert m.last_status.labels(source="club", status="success")._value.get() == 1
     assert m.source_items.labels(source="club", lifecycle="upcoming")._value.get() > 0
-    assert m.source_items.labels(source="club", lifecycle="ended")._value.get() == 0
+    # Zero-filled: "published" is video-only, so it is 0 for this source whatever the date. (Not "ended": the
+    # fixture's dates are fixed and the lifecycle view reads the real clock, so that count changes over time.)
+    assert m.source_items.labels(source="club", lifecycle="published")._value.get() == 0
 
 
 async def test_database_mode_runs_what_is_due_and_honours_run_requests(
