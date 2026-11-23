@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 from selectolax.parser import HTMLParser
 
-from events_mcp.crawl.config import ResolvedSource
+from events_mcp.crawl.config import DEFAULT_NAV_TIMEOUT_SEC, ResolvedSource
 from events_mcp.crawl.extractors import Context
 from events_mcp.crawl.extractors.feeds import extract_rss, extract_youtube
 from events_mcp.crawl.extractors.ical import extract_ical
@@ -56,7 +56,10 @@ async def fetch_pages(
             await fetcher.check(url, rps=source.politeness.rps, ignore_robots=source.politeness.ignore_robots)
             pages.append(
                 await browser.get(
-                    url, stealth=source.render == "browser_stealth", wait_for_selector=source.wait_for_selector
+                    url,
+                    stealth=source.render == "browser_stealth",
+                    wait_for_selector=source.wait_for_selector,
+                    nav_timeout_sec=source.nav_timeout_sec or DEFAULT_NAV_TIMEOUT_SEC,
                 )
             )
             continue

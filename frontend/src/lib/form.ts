@@ -28,6 +28,7 @@ export interface SourceForm {
   maxPages: string;
   interval: string;
   timeoutSec: string;
+  navTimeoutSec: string;
   render: '' | Render;
   waitForSelector: string;
   rps: string;
@@ -49,6 +50,7 @@ export const SOURCE_FIELDS: ReadonlySet<string> = new Set([
   'name', 'type', 'url', 'urls', 'channel_id', 'max_pages', 'interval', 'city', 'timezone', 'render',
   'extractor', 'politeness', 'default_kind', 'intent', 'venue', 'egress', 'ignore_patterns',
   'wait_for_selector', 'max_llm_calls', 'max_input_chars', 'timeout_sec',
+  'nav_timeout_sec',
 ]);
 
 export const DEFAULTS_FIELDS: ReadonlySet<string> = new Set([
@@ -60,7 +62,7 @@ const EMPTY_VENUE: VenueForm = { name: '', city: '', address: '', lat: '', lon: 
 export function emptySourceForm(type: SourceType = 'venue'): SourceForm {
   return applyTypePreset(
     {
-      name: '', type, url: '', urls: [], channelId: '', maxPages: '', interval: '', timeoutSec: '',
+      name: '', type, url: '', urls: [], channelId: '', maxPages: '', interval: '', timeoutSec: '', navTimeoutSec: '',
       render: '', waitForSelector: '', rps: '', ignoreRobots: false, extractor: '', defaultKind: '',
       intent: '', ignorePatterns: [], maxLlmCalls: '', maxInputChars: '', city: '', timezone: '',
       venue: { ...EMPTY_VENUE }, egress: [],
@@ -97,6 +99,7 @@ export function formFromConfig(config: Record<string, unknown>): SourceForm {
     maxPages: num(config.max_pages),
     interval: str(config.interval),
     timeoutSec: num(config.timeout_sec),
+    navTimeoutSec: num(config.nav_timeout_sec),
     render: str(config.render) as SourceForm['render'],
     waitForSelector: str(config.wait_for_selector),
     rps: num(pol.rps),
@@ -139,6 +142,7 @@ export function toSourcePayload(f: SourceForm, opts: PayloadOptions = {}): Sourc
   set(body, 'max_pages', n(f.maxPages));
   set(body, 'interval', t(f.interval));
   set(body, 'timeout_sec', n(f.timeoutSec));
+  set(body, 'nav_timeout_sec', n(f.navTimeoutSec));
   set(body, 'render', f.render || undefined);
   set(body, 'wait_for_selector', t(f.waitForSelector));
   const rps = n(f.rps);
@@ -171,6 +175,7 @@ export function toSourcePayload(f: SourceForm, opts: PayloadOptions = {}): Sourc
 const NUMERIC: [keyof SourceForm, string, boolean][] = [
   ['maxPages', 'max_pages', true],
   ['timeoutSec', 'timeout_sec', true],
+  ['navTimeoutSec', 'nav_timeout_sec', true],
   ['rps', 'politeness.rps', false],
   ['maxLlmCalls', 'max_llm_calls', true],
   ['maxInputChars', 'max_input_chars', true],

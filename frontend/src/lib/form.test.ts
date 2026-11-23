@@ -40,12 +40,12 @@ describe('formFromConfig', () => {
   it('round-trips a stored config through the form', () => {
     const config = {
       name: 'n', type: 'venue', url: 'https://n.test', urls: [], max_pages: 3, interval: '12h', city: null,
-      politeness: { rps: 2, ignore_robots: true }, intent: 'only concerts', timeout_sec: 60,
+      politeness: { rps: 2, ignore_robots: true }, intent: 'only concerts', timeout_sec: 60, nav_timeout_sec: 90,
       venue: { name: 'V', city: 'Berlin', address: null, lat: 1, lon: 2 }, egress: ['n.test'], render: 'browser',
     };
     const payload = toSourcePayload(formFromConfig(config));
     expect(payload).toMatchObject({
-      name: 'n', max_pages: 3, interval: '12h', timeout_sec: 60, render: 'browser', intent: 'only concerts',
+      name: 'n', max_pages: 3, interval: '12h', timeout_sec: 60, nav_timeout_sec: 90, render: 'browser', intent: 'only concerts',
       politeness: { rps: 2, ignore_robots: true }, venue: { name: 'V', city: 'Berlin', lat: 1, lon: 2 }, egress: ['n.test'],
     });
     expect('city' in payload).toBe(false);

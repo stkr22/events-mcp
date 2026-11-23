@@ -56,6 +56,20 @@ class Metrics:
             ["source", "lifecycle"],
             registry=self.registry,
         )
+        self.consecutive_failures = Gauge(
+            "events_scrape_consecutive_failures",
+            "Finished runs since the source's last success that did not succeed (failed, pending_extraction, "
+            "blocked_robots); 0 when the newest run succeeded. A never-successful source counts all its runs.",
+            ["source"],
+            registry=self.registry,
+        )
+        self.latest_start = Gauge(
+            "events_source_latest_starts_at_timestamp_seconds",
+            "Latest starts_at among the source's items that are still being seen (not stale); the source's "
+            "horizon is this minus time(). Absent for a source with no dated items.",
+            ["source"],
+            registry=self.registry,
+        )
         self.llm_calls = Gauge(
             "events_llm_calls_24h",
             "LLM calls recorded by scrape runs in the last 24 hours, by provider.",
@@ -133,7 +147,15 @@ class Metrics:
 
     async def _refresh_crawl(self, conn: Any) -> None:
         """Per-source gauges for the crawler alerts. Disabled sources are left out on purpose."""
-        for g in (self.interval, self.last_status, self.source_items, self.pending_age, self.llm_calls):
+        for g in (
+            self.interval,
+            self.last_status,
+            self.source_items,
+            self.pending_age,
+            self.consecutive_failures,
+            self.latest_start,
+            self.llm_calls,
+        ):
             g.clear()
         cur = await conn.execute(
             "SELECT name, extract(epoch FROM scrape_interval)::float8 AS secs FROM sources WHERE enabled"
@@ -174,6 +196,33 @@ class Metrics:
         )
         for row in await cur.fetchall():
             self.pending_age.labels(source=row["name"]).set(row["age"])
+        cur = await conn.execute(
+            """
+            SELECT s.name, count(r.id) FILTER (
+                       WHERE r.status IN ('failed', 'pending_extraction', 'blocked_robots')
+                         AND r.started_at > coalesce(ok.at, '-infinity')
+                   ) AS n
+            FROM sources s
+            LEFT JOIN scrape_runs r ON r.source_id = s.id
+            LEFT JOIN LATERAL (
+                SELECT max(started_at) AS at FROM scrape_runs WHERE source_id = s.id AND status = 'success'
+            ) ok ON TRUE
+            WHERE s.enabled
+            GROUP BY s.name
+            """
+        )
+        for row in await cur.fetchall():
+            self.consecutive_failures.labels(source=row["name"]).set(row["n"])
+        cur = await conn.execute(
+            """
+            SELECT s.name, extract(epoch FROM max(l.starts_at))::float8 AS ts
+            FROM event_lifecycle l JOIN sources s ON s.id = l.source_id
+            WHERE s.enabled AND l.kind <> 'video' AND NOT l.is_stale
+            GROUP BY s.name HAVING max(l.starts_at) IS NOT NULL
+            """
+        )
+        for row in await cur.fetchall():
+            self.latest_start.labels(source=row["name"]).set(row["ts"])
         cur = await conn.execute(
             "SELECT llm_provider, sum(llm_calls)::int AS n FROM scrape_runs "
             "WHERE llm_provider IS NOT NULL AND started_at > now() - interval '24 hours' GROUP BY 1"

@@ -60,7 +60,50 @@ def build_items(
             tickets_url=r.tickets_url,
         )
         out[key] = (item, ref)
-    return list(out.values()), rejected
+    return _drop_linkless_twins(list(out.values())), rejected
+
+
+_MERGEABLE = (
+    "summary",
+    "raw_text",
+    "ends_at",
+    "status",
+    "tickets_url",
+    "registration_opens_at",
+    "registration_closes_at",
+)
+
+
+def _twin_signature(item: Item) -> tuple[str, datetime | None]:
+    return norm_text(item.title), item.starts_at
+
+
+def _drop_linkless_twins(pairs: list[tuple[Item, VenueRef | None]]) -> list[tuple[Item, VenueRef | None]]:
+    """Drop a URL-less item when the same run also yields that event (title, start) with a link.
+
+    The LLM sometimes emits one listing twice, once without its URL; the title-hash row then lives beside the
+    URL row forever. Two items that both have links are kept: a site may genuinely list a show twice. What the
+    dropped item knew and the kept one lacks (summary, venue, ...) is merged into the kept one.
+    """
+    linked: dict[tuple[str, datetime | None], int] = {}
+    for n, (item, _) in enumerate(pairs):
+        if not item.dedupe_key.startswith("t:"):
+            linked.setdefault(_twin_signature(item), n)
+    result = list(pairs)
+    dropped: set[int] = set()
+    for n, (item, ref) in enumerate(pairs):
+        target = linked.get(_twin_signature(item)) if item.dedupe_key.startswith("t:") else None
+        if target is None:
+            continue
+        dropped.add(n)
+        winner, winner_ref = result[target]
+        for name in _MERGEABLE:
+            if getattr(winner, name) is None and getattr(item, name) is not None:
+                setattr(winner, name, getattr(item, name))
+        result[target] = (winner, winner_ref or ref)
+    if dropped:
+        log.info("dropped %d URL-less items that the same run lists with a URL", len(dropped))
+    return [pair for n, pair in enumerate(result) if n not in dropped]
 
 
 def stabilize_keys(

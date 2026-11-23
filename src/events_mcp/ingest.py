@@ -345,3 +345,37 @@ async def disable_missing(conn: AsyncConnection[Any], names: list[str]) -> list[
         "UPDATE sources SET enabled = false WHERE enabled AND NOT (name = ANY(%s)) RETURNING name", (names,)
     )
     return [r["name"] if isinstance(r, dict) else r[0] for r in await cur.fetchall()]
+
+
+async def remove_linkless_twins(conn: AsyncConnection[Any], *, apply: bool) -> tuple[int, int]:
+    """Delete URL-less title-hash rows whose event is also stored with a link (same source, title and start).
+
+    The cleanup for rows the crawler used to keep beside their URL twin. Rows the user tracked are kept (they
+    would take the tracking with them). Returns ``(deleted or deletable, kept because tracked)``.
+    """
+    from events_mcp.crawl.normalize import norm_text  # noqa: PLC0415 - one normalisation for crawler and cleanup
+
+    cur = await conn.execute(
+        """
+        SELECT e.id, e.source_id, e.dedupe_key, e.title, e.starts_at,
+               EXISTS (SELECT 1 FROM event_user_state u WHERE u.event_id = e.id) AS tracked
+        FROM events e
+        """
+    )
+    groups: dict[tuple[int, str, datetime | None], list[dict[str, Any]]] = {}
+    for r in await cur.fetchall():
+        groups.setdefault((r["source_id"], norm_text(r["title"]), r["starts_at"]), []).append(r)
+    doomed: list[int] = []
+    tracked = 0
+    for rows in groups.values():
+        if not any(not r["dedupe_key"].startswith("t:") for r in rows):
+            continue
+        for r in rows:
+            if r["dedupe_key"].startswith("t:"):
+                if r["tracked"]:
+                    tracked += 1
+                else:
+                    doomed.append(r["id"])
+    if apply and doomed:
+        await conn.execute("DELETE FROM events WHERE id = ANY(%s)", (doomed,))
+    return len(doomed), tracked

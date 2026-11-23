@@ -27,6 +27,8 @@ WebGLRenderingContext.prototype.getParameter = function (p) {
 """
 
 NETWORK_IDLE_CAP_MS = 10_000
+RETRY_PAUSE_SEC = 10.0
+"""Wait before the second navigation attempt; also keeps a site's Crawl-delay (10 s on rausgegangen.de)."""
 CHALLENGE_WAIT_SEC = 20
 
 
@@ -40,7 +42,9 @@ class BrowserFetcher:
         self.timezone = timezone
         self._gate = asyncio.Semaphore(1)
 
-    async def get(self, url: str, *, stealth: bool, wait_for_selector: str | None = None) -> Page:  # noqa: PLR0912
+    async def get(  # noqa: PLR0912
+        self, url: str, *, stealth: bool, wait_for_selector: str | None = None, nav_timeout_sec: int = 30
+    ) -> Page:
         """Render ``url`` and return the resulting DOM as a ``Page``."""
         from playwright.async_api import Error as PlaywrightError  # noqa: PLC0415
         from playwright.async_api import TimeoutError as PlaywrightTimeout  # noqa: PLC0415
@@ -63,7 +67,7 @@ class BrowserFetcher:
                     await context.add_init_script(STEALTH_JS)
                 page = await context.new_page()
                 try:
-                    resp = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    resp = await goto_with_retry(page, url, nav_timeout_sec * 1000)
                     with_idle = page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_CAP_MS)
                     try:
                         await with_idle
@@ -93,3 +97,31 @@ class BrowserFetcher:
                 if context is not None:
                     await context.close()
                 await browser.close()
+
+
+async def goto_with_retry(page: Any, url: str, timeout_ms: int, pause_sec: float = RETRY_PAUSE_SEC) -> Any:
+    """Navigate; on a timeout, pause and try once more with twice the time.
+
+    The first attempt waits for ``domcontentloaded``. The retry only waits for the response to commit and then
+    gives the document the same time to parse: a site that is slow to answer, or that never finishes loading
+    third-party scripts, still yields its HTML. A second timeout is raised as is.
+    """
+    from playwright.async_api import TimeoutError as PlaywrightTimeout  # noqa: PLC0415
+
+    try:
+        return await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    except PlaywrightTimeout as first:
+        log.warning(
+            "%s: navigation timed out after %d s (%s); retrying with %d s",
+            url,
+            timeout_ms // 1000,
+            str(first).splitlines()[0],
+            timeout_ms * 2 // 1000,
+        )
+    await asyncio.sleep(pause_sec)
+    resp = await page.goto(url, wait_until="commit", timeout=timeout_ms * 2)
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    except PlaywrightTimeout:
+        log.info("%s: committed but never reached domcontentloaded, using what is there", url)
+    return resp

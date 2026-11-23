@@ -66,6 +66,8 @@ export function SourceFields({ form, patch, setType, errors, options, inherited,
               hint="How often to re-crawl: 30m, 6h or 2d." error={err('interval')} />
             <TextField label="Timeout (seconds)" value={form.timeoutSec} onChange={(v) => patch({ timeoutSec: v })} placeholder="300" inputMode="numeric"
               hint="Hard limit for one run, 30 to 3000. Empty uses the crawler-wide 300 s." error={err('timeout_sec')} />
+            <TextField label="Page load timeout (seconds)" value={form.navTimeoutSec} onChange={(v) => patch({ navTimeoutSec: v })} placeholder="30" inputMode="numeric"
+              hint="Browser rendering: how long a page may take to answer, 10 to 300. A timeout is retried once with twice the time." error={err('nav_timeout_sec')} />
             <TextField label="Wait for selector" value={form.waitForSelector} onChange={(v) => patch({ waitForSelector: v })} placeholder="CSS selector" mono
               hint="Browser rendering waits for this element before reading the page." error={err('wait_for_selector')} />
             <TextField label="Requests per second (per host)" value={form.rps} onChange={(v) => patch({ rps: v })} placeholder={inherited.rps} inputMode="decimal"

@@ -519,6 +519,8 @@ export interface components {
             max_input_chars: number;
             /** Timeout Sec */
             timeout_sec?: number | null;
+            /** Nav Timeout Sec */
+            nav_timeout_sec?: number | null;
         };
         /**
          * SourceDetail

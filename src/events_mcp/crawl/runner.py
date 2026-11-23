@@ -217,6 +217,16 @@ async def _store(
                 await conn.execute("UPDATE events SET venue_id = %s WHERE id = %s", (venue_id, item_id))
             new += int(inserted)
         await mark_extracted(conn, source_id, digest, run_id)
+    dated = [item.starts_at for item, _ in pairs if item.starts_at]
+    if dated:
+        latest = max(dated)
+        log.info(
+            "source %s: %d items, latest starts_at %s (%d days ahead)",
+            source_id,
+            len(pairs),
+            latest.astimezone(tz).isoformat(timespec="minutes"),
+            (latest - datetime.now(UTC)).days,
+        )
     return new
 
 
