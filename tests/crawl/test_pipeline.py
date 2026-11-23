@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from events_mcp.crawl.models import RawItem
 from events_mcp.crawl.pipeline import build_items, stabilize_keys
@@ -70,3 +71,35 @@ def test_build_items_carries_registration_and_drops_implausible_windows() -> Non
         got = by_title[title]
         assert (got.registration_opens_at, got.registration_closes_at) == (None, None)
         assert got.tickets_url == "https://tickets.example/x"  # the link stays
+
+
+def _twin_raw(title: str, url: str | None, **kw: Any) -> RawItem:
+    return RawItem(title=title, kind="event", starts_at=NOW + timedelta(days=3), url=url, **kw)
+
+
+def test_a_linkless_item_is_dropped_when_the_same_run_has_it_with_a_link() -> None:
+    source = make_source()
+    raw = [
+        _twin_raw("GET UP Comedy", None, summary="Weekly open mic."),
+        _twin_raw("get up  comedy!", "https://club.example/e/get-up-205"),
+        _twin_raw("Quiz", None),  # no twin: stays
+    ]
+    pairs, _ = build_items(raw, source, TZ, NOW)
+    assert [p[0].dedupe_key[:2] for p in pairs] == ["u:", "t:"]
+    assert pairs[0][0].summary == "Weekly open mic."  # what the dropped twin knew is kept
+
+
+def test_two_linked_items_with_the_same_title_and_start_are_both_kept() -> None:
+    raw = [
+        _twin_raw("GET UP", "https://club.example/e/get-up-205"),
+        _twin_raw("GET UP", "https://club.example/e/get-up-223"),
+    ]
+    pairs, _ = build_items(raw, make_source(), TZ, NOW)
+    assert len(pairs) == 2
+
+
+def test_a_linkless_item_at_another_start_is_not_a_twin() -> None:
+    other = RawItem(title="GET UP", kind="event", starts_at=NOW + timedelta(days=10))
+    raw = [_twin_raw("GET UP", "https://club.example/e/get-up-205"), other]
+    pairs, _ = build_items(raw, make_source(), TZ, NOW)
+    assert len(pairs) == 2

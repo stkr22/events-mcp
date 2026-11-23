@@ -14,6 +14,7 @@ Render = Literal["http", "browser", "browser_stealth"]
 ExtractorName = Literal["auto", "ical", "rss", "youtube", "jsonld", "selectors", "llm"]
 KindName = Literal["event", "exhibition", "video", "sale", "other"]
 
+DEFAULT_NAV_TIMEOUT_SEC = 30
 _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _INTERVAL = re.compile(r"^(\d+)\s*([mhd])$")
 # The channel feed mixes Shorts into its 15 entries (14 of 15 on some channels); the "UULF" playlist is the
@@ -101,6 +102,9 @@ class Source(_Strict):
     max_input_chars: int = 150_000
     timeout_sec: Annotated[int, Field(ge=30, le=3000)] | None = None
     """Hard limit for one run of this source; default is the crawler-wide 300 s."""
+    nav_timeout_sec: Annotated[int, Field(ge=10, le=300)] | None = None
+    """Browser sources: how long the page may take to start answering (default 30 s). A timeout is retried once,
+    with the committed page accepted and twice the time, before the run fails."""
 
     @field_validator("name")
     @classmethod

@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -110,6 +111,32 @@ async def test_metrics_refresh(pool, conn: AsyncConnection[DictRow], seeded: dic
     await m.refresh(pool, None, FakeEmbedder.model)
     gone = reg.get_sample_value("events_last_successful_scrape_timestamp_seconds", {"source": "Space Channel"})
     assert gone is None
+
+
+async def test_consecutive_failures_and_horizon_metrics(
+    pool, conn: AsyncConnection[DictRow], seeded: dict[str, int]
+) -> None:
+    ids = {r["name"]: r["id"] for r in await (await conn.execute("SELECT id, name FROM sources")).fetchall()}
+    fabrik, channel, kunst = ids["Fabrik"], ids["Space Channel"], ids["Kunsthalle Hamburg"]
+    for status in ("success", "failed", "failed"):
+        await finish_run(conn, await start_run(conn, fabrik), status, 0, None if status == "success" else "timeout")
+    for _ in range(3):  # never succeeded: every run counts
+        await finish_run(conn, await start_run(conn, channel), "failed", 0, "boom")
+    await finish_run(conn, await start_run(conn, kunst), "failed", 0, "old")
+    await finish_run(conn, await start_run(conn, kunst), "success", 1)
+    m = Metrics()
+    await m.refresh(pool, None, FakeEmbedder.model)
+    value = m.registry.get_sample_value
+    assert value("events_scrape_consecutive_failures", {"source": "Fabrik"}) == 2
+    assert value("events_scrape_consecutive_failures", {"source": "Space Channel"}) == 3
+    assert value("events_scrape_consecutive_failures", {"source": "Kunsthalle Hamburg"}) == 0
+    await finish_run(conn, await start_run(conn, fabrik), "success", 1)
+    await m.refresh(pool, None, FakeEmbedder.model)
+    assert value("events_scrape_consecutive_failures", {"source": "Fabrik"}) == 0
+    # Fabrik's latest dated event (not a video, not stale) is the cancelled food market, 5 days out.
+    latest = value("events_source_latest_starts_at_timestamp_seconds", {"source": "Fabrik"})
+    assert latest is not None and 4 * 86400 < latest - datetime.now(UTC).timestamp() < 6 * 86400
+    assert value("events_source_latest_starts_at_timestamp_seconds", {"source": "Space Channel"}) is None  # videos only
 
 
 async def test_openai_embedder_breaker() -> None:

@@ -79,6 +79,9 @@ events-mcp migrate
 events-mcp import items.jsonl --source-name "Kunsthalle" --source-type museum \
     --source-url https://www.hamburger-kunsthalle.de --city Hamburg
 events-mcp backfill-embeddings
+
+# one-off: delete URL-less rows that also exist with a URL (dry run; add --apply to delete)
+events-mcp dedupe-linkless
 events-mcp import-sources sources.yaml   # one-off: load defaults and sources into the database
 events-mcp admin                     # the admin app (needs the [admin] extra or the -admin image)
 events-mcp scrape [--config sources.yaml] [--source NAME ...] [--force] [--dry-run] [--extractor TIER]
@@ -188,6 +191,8 @@ Local development: `EVENTS_ADMIN_DATABASE_URL=… EVENTS_ADMIN_DEV_AUTH=true eve
 | `events_items{kind,lifecycle}` | item counts |
 | `events_items_missing_embedding` | backfill backlog |
 | `events_source_scrape_interval_seconds{source}`, `events_scrape_last_status{source,status}`, `events_source_items{source,lifecycle}`, `events_pending_extraction_seconds{source}`, `events_llm_calls_24h{provider}` | crawler health, enabled sources only |
+| `events_scrape_consecutive_failures{source}` | runs since the last success that failed, were blocked or waited for an LLM; alert on `>= 3`, independent of the interval |
+| `events_source_latest_starts_at_timestamp_seconds{source}` | newest `starts_at` among a source's live items; `... - time()` is its horizon in seconds |
 | `events_db_up`, `events_embedding_endpoint_up` | refreshed every 60 s |
 | `events_mcp_tool_calls_total{tool,outcome}`, `events_mcp_searches_total{semantic}` | usage |
 

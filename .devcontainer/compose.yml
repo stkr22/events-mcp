@@ -1,0 +1,45 @@
+# podman-compose puts all services in one pod by default, which conflicts with
+# `userns_mode: keep-id` on the dev service ("--userns and --pod cannot be set
+# together"). Services still reach each other by name via the compose network.
+x-podman:
+  in_pod: false
+
+services:
+  app:
+    image: ghcr.io/stkr22/devcontainer-python-container:1.5.0@sha256:94c35390676241f49f65561340fc23b59d7db15cdd878ad73a8f459ebae23b2c
+    command: sleep infinity
+    userns_mode: "keep-id"  # Podman: keeps your host UID
+    working_dir: /workspaces/events-mcp
+    volumes:
+      - ..:/workspaces/events-mcp:cached,U
+    environment:
+      # The test suite drops and recreates the public schema of this database; it holds nothing else.
+      EVENTS_TEST_DATABASE_URL: postgresql://postgres:postgres@db:5432/postgres
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - pa-events-mcp-network
+
+  db:
+    # Same image as CI (.github/workflows/ci.yml): pgvector plus contrib (cube, earthdistance).
+    image: docker.io/pgvector/pgvector:0.8.2-pg18
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - pa-events-mcp-network
+
+volumes:
+  pgdata:
+
+
+networks:
+  pa-events-mcp-network:
+    driver: bridge

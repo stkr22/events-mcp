@@ -1261,6 +1261,19 @@
               }
             ],
             "title": "Timeout Sec"
+          },
+          "nav_timeout_sec": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 300.0,
+                "minimum": 10.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nav Timeout Sec"
           }
         },
         "additionalProperties": false,

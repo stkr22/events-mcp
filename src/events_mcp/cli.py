@@ -15,7 +15,15 @@ from prometheus_client import start_http_server
 from events_mcp.config import Settings, get_settings
 from events_mcp.db import connect, migrate_with_retry
 from events_mcp.embeddings import document_text
-from events_mcp.ingest import Item, backfill_embeddings, finish_run, start_run, upsert_event, upsert_source
+from events_mcp.ingest import (
+    Item,
+    backfill_embeddings,
+    finish_run,
+    remove_linkless_twins,
+    start_run,
+    upsert_event,
+    upsert_source,
+)
 from events_mcp.server import create_app, make_embedder
 
 log = logging.getLogger("events_mcp")
@@ -123,6 +131,13 @@ async def _backfill(settings: Settings, args: argparse.Namespace) -> None:
     print(f"embedded {n} items")
 
 
+async def _dedupe(settings: Settings, args: argparse.Namespace) -> None:
+    async with await connect(settings.database_url.get_secret_value()) as conn:
+        n, tracked = await remove_linkless_twins(conn, apply=args.apply)
+    verb = "deleted" if args.apply else "would delete (rerun with --apply)"
+    print(f"{verb} {n} URL-less rows that have a URL twin; kept {tracked} the user tracked")
+
+
 def _scrape(args: argparse.Namespace) -> int:
     try:
         from events_mcp.crawl.config import CrawlerSettings  # noqa: PLC0415 - optional [crawl] dependencies
@@ -169,6 +184,8 @@ def main(argv: list[str] | None = None) -> None:
     rx.add_argument("--source", required=True)
     rx.add_argument("--snapshot", help="snapshot key (default: the newest)")
     rx.add_argument("--config", type=Path)
+    dd = sub.add_parser("dedupe-linkless", help="delete URL-less rows that also exist with a URL (dry run by default)")
+    dd.add_argument("--apply", action="store_true")
     bf = sub.add_parser("backfill-embeddings", help="embed items missing a vector from the configured model")
     bf.add_argument("--batch-size", type=int, default=16)
     args = parser.parse_args(argv)
@@ -187,5 +204,7 @@ def main(argv: list[str] | None = None) -> None:
             asyncio.run(_import_sources(settings, args))
         case "import":
             asyncio.run(_import(settings, args))
+        case "dedupe-linkless":
+            asyncio.run(_dedupe(settings, args))
         case "backfill-embeddings":
             asyncio.run(_backfill(settings, args))
